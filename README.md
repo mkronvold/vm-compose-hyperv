@@ -5,10 +5,10 @@ Hyper‑V Compose is a **docker‑compose‑like orchestrator** for building and
 It gives you a clean, predictable workflow:
 
 ```
-./vm-compose.ps1 up
-./vm-compose.ps1 down
-./vm-compose.ps1 restart
-./vm-compose.ps1 destroy
+./vm-compose.ps1 up [-DryRun]
+./vm-compose.ps1 down [-DryRun]
+./vm-compose.ps1 restart [-DryRun]
+./vm-compose.ps1 destroy [-DryRun]
 ./vm-compose.ps1 status
 ./vm-compose.ps1 inspect <vm>
 ./vm-compose.ps1 logs <vm>
@@ -18,6 +18,12 @@ It gives you a clean, predictable workflow:
 ./vm-compose.ps1 ip <vm>
 ./vm-compose.ps1 top <vm>
 ./vm-compose.ps1 health
+./vm-compose.ps1 validate
+./vm-compose.ps1 version
+./vm-compose.ps1 mount <vm> <storageName>
+./vm-compose.ps1 unmount <vm> <storageName>
+./vm-compose.ps1 metrics
+./vm-compose.ps1 web
 ```
 
 Each VM is fully automated:
@@ -121,6 +127,37 @@ So Docker images, containers, and volumes survive.
 
 ---
 
+# Dry Run Mode
+
+Add `-DryRun` to any mutating command to preview what would happen without making changes:
+
+```
+./vm-compose.ps1 up -DryRun
+./vm-compose.ps1 destroy -DryRun
+```
+
+---
+
+# Validate
+
+Lint your `vmstack.yml` before running:
+
+```
+./vm-compose.ps1 validate
+```
+
+Checks required fields, network references, storage references, and NAT subnet config.
+
+---
+
+# Version
+
+```
+./vm-compose.ps1 version
+```
+
+---
+
 # Inspection & Monitoring
 
 ## Show cluster status
@@ -203,6 +240,41 @@ Checks:
 
 ---
 
+# Storage
+
+Hyper‑V Compose supports shared disks and named volumes via a `storage:` section.
+
+### Example
+
+```yaml
+storage:
+  shareddata:
+    path: "storage/shareddata.vhdx"
+    size_gb: 100
+```
+
+Mount storage on VMs via the `mount:` key:
+
+```yaml
+vms:
+  winhost1:
+    mount:
+      - shareddata
+```
+
+Shared VHDXes are **auto-created** during `up` if they don't exist.
+
+### Runtime mount / unmount
+
+Hot-add or remove a storage disk from a running VM:
+
+```
+./vm-compose.ps1 mount winhost1 shareddata
+./vm-compose.ps1 unmount winhost1 shareddata
+```
+
+---
+
 # Networks
 
 Hyper‑V Compose supports a `networks:` section similar to Docker Compose.
@@ -240,7 +312,7 @@ vms:
 
 # Storage
 
-Hyper‑V Compose supports shared disks and named volumes via a `storage:` section.
+Hyper-V Compose supports shared disks and named volumes via a `storage:` section.
 
 ### Example
 
@@ -251,16 +323,16 @@ storage:
     size_gb: 100
 ```
 
-Attach storage to VMs:
+Mount storage on VMs via the `mount:` key:
 
 ```yaml
 vms:
   winhost1:
-    attach:
+    mount:
       - shareddata
 ```
 
-This mirrors Docker Compose’s `volumes:` section and supports:
+This mirrors Docker Compose's `volumes:` section and supports:
 
 - shared datasets  
 - cluster state  
@@ -287,11 +359,64 @@ You can delete and recreate VMs without losing container data.
 
 ---
 
+# Prometheus Metrics
+
+A standalone metrics exporter (`vm-metrics.ps1`) exposes per-VM metrics on `:9090/metrics`.
+
+```
+./vm-compose.ps1 metrics       # Show service status
+```
+
+**Install as a Windows service (run as Administrator):**
+
+```
+./vm-metrics-install.ps1
+./vm-metrics-uninstall.ps1
+```
+
+**Metrics exported:**
+
+| Metric | Description |
+|--------|-------------|
+| `hyperv_vm_state` | 1 = Running, 0 = other |
+| `hyperv_vm_cpu_usage_percent` | CPU usage % |
+| `hyperv_vm_memory_assigned_bytes` | Assigned memory |
+| `hyperv_vm_uptime_seconds` | Uptime |
+| `hyperv_vm_ip_assigned` | 1 = has IPv4 |
+| `hyperv_vm_docker_running` | 1 = Docker service running |
+
+---
+
+# Web Dashboard
+
+A [Pode](https://badgerati.github.io/Pode/)-based web dashboard at `http://localhost:8080`.
+
+```
+./vm-compose.ps1 web           # Show service status / URL
+./vm-dashboard.ps1             # Run directly
+```
+
+**Install as a Windows service (run as Administrator):**
+
+```
+./vm-dashboard-install.ps1
+./vm-dashboard-uninstall.ps1
+```
+
+Features:
+- Live VM table with auto-refresh (every 10s)
+- Per-VM detail page (disks, adapters, checkpoints)
+- Start / Stop / Restart buttons
+- JSON API: `GET /api/vms`, `GET /api/vms/:name`
+
+---
+
 # Requirements
 
-- Windows 11 with Hyper‑V enabled  
+- Windows 11 with Hyper-V enabled  
 - PowerShell 7+  
 - Windows Server ISO (2022 or 2025 recommended)  
+- [Pode](https://github.com/Badgerati/Pode) module (auto-installed by `vm-dashboard.ps1`)  
 
 ---
 
@@ -303,7 +428,7 @@ This system gives you:
 
 - reproducible VM builds  
 - persistent container storage  
-- a compose‑like workflow  
+- a compose-like workflow  
 - fully automated provisioning  
 - disposable compute, durable storage  
 

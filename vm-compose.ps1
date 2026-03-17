@@ -3,10 +3,10 @@
     Hyper-V Compose: A docker-compose-like orchestrator for Windows Server VMs.
 
 .USAGE
-    ./vm-compose.ps1 up
-    ./vm-compose.ps1 down
-    ./vm-compose.ps1 restart
-    ./vm-compose.ps1 destroy
+    ./vm-compose.ps1 up [-DryRun]
+    ./vm-compose.ps1 down [-DryRun]
+    ./vm-compose.ps1 restart [-DryRun]
+    ./vm-compose.ps1 destroy [-DryRun]
     ./vm-compose.ps1 status
     ./vm-compose.ps1 inspect <vm>
     ./vm-compose.ps1 logs <vm>
@@ -16,18 +16,28 @@
     ./vm-compose.ps1 ip <vm>
     ./vm-compose.ps1 top <vm>
     ./vm-compose.ps1 health
+    ./vm-compose.ps1 validate
+    ./vm-compose.ps1 version
+    ./vm-compose.ps1 mount <vm> <storageName>
+    ./vm-compose.ps1 unmount <vm> <storageName>
+    ./vm-compose.ps1 metrics
+    ./vm-compose.ps1 web
 
 .NOTES
     Requires PowerShell 7+ for ConvertFrom-Yaml.
 #>
 
+$Version = "1.1.0"
+
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet("up","down","restart","destroy","status","inspect","logs","exec","ps","ssh","ip","top","health")]
+    [ValidateSet("up","down","restart","destroy","status","inspect","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","metrics","web")]
     [string]$Command,
 
     [string]$VmName,
     [string]$ExecCommand,
+    [string]$StorageName,
+    [switch]$DryRun,
     [string]$ConfigFile = "vmstack.yml",
     [string]$VmRoot = "D:\HyperV\VMs"
 )
@@ -35,6 +45,17 @@ param(
 if (-not (Test-Path $ConfigFile)) {
     Write-Host "Config file not found: $ConfigFile" -ForegroundColor Red
     exit 1
+}
+
+# Dry-run helper: runs the scriptblock only when not in dry-run mode.
+# Always prints what would happen.
+function Invoke-IfLive {
+    param([string]$Description, [scriptblock]$Action)
+    if ($DryRun) {
+        Write-Host "[DRY RUN] Would: $Description" -ForegroundColor Cyan
+    } else {
+        & $Action
+    }
 }
 
 $stack = Get-Content $ConfigFile | ConvertFrom-Yaml
@@ -54,23 +75,27 @@ function Initialize-Network {
 
         "internal" {
             Write-Host "Creating INTERNAL switch '$switchName'"
-            New-VMSwitch -Name $switchName -SwitchType Internal | Out-Null
+            Invoke-IfLive "New-VMSwitch -Name $switchName -SwitchType Internal" {
+                New-VMSwitch -Name $switchName -SwitchType Internal | Out-Null
+            }
         }
 
         "external" {
             Write-Host "Creating EXTERNAL switch '$switchName'"
             $nic = Get-NetAdapter | Where-Object Status -eq "Up" | Select-Object -First 1
-            New-VMSwitch -Name $switchName -NetAdapterName $nic.Name -AllowManagementOS $true | Out-Null
+            Invoke-IfLive "New-VMSwitch -Name $switchName -NetAdapterName $($nic.Name)" {
+                New-VMSwitch -Name $switchName -NetAdapterName $nic.Name -AllowManagementOS $true | Out-Null
+            }
         }
 
         "nat" {
             Write-Host "Creating NAT switch '$switchName'"
-            New-VMSwitch -Name $switchName -SwitchType Internal | Out-Null
-
-            $ifIndex = (Get-NetAdapter | Where-Object Name -eq $switchName).ifIndex
-            New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $cfg.gateway -PrefixLength 24 | Out-Null
-
-            New-NetNat -Name $switchName -InternalIPInterfaceAddressPrefix $cfg.subnet | Out-Null
+            Invoke-IfLive "New-VMSwitch $switchName + New-NetIPAddress $($cfg.gateway) + New-NetNat $($cfg.subnet)" {
+                New-VMSwitch -Name $switchName -SwitchType Internal | Out-Null
+                $ifIndex = (Get-NetAdapter | Where-Object Name -eq $switchName).ifIndex
+                New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $cfg.gateway -PrefixLength 24 | Out-Null
+                New-NetNat -Name $switchName -InternalIPInterfaceAddressPrefix $cfg.subnet | Out-Null
+            }
         }
 
         default {
@@ -98,8 +123,10 @@ function Build-VM {
     $PersistentVhdPath = Join-Path $VmPath "persistent-storage.vhdx"
     $FloppyPath = Join-Path $VmPath "autounattend.vfd"
 
-    New-Item -ItemType Directory -Path $VmPath -Force | Out-Null
-    New-Item -ItemType Directory -Path $SetupDir -Force | Out-Null
+    Invoke-IfLive "New-Item Directory $VmPath + $SetupDir" {
+        New-Item -ItemType Directory -Path $VmPath -Force | Out-Null
+        New-Item -ItemType Directory -Path $SetupDir -Force | Out-Null
+    }
 
     # -------------------------
     # Generate unattend.xml
@@ -194,7 +221,9 @@ function Build-VM {
 </unattend>
 "@
 
-    $unattend | Out-File "$SetupDir\Autounattend.xml" -Encoding utf8 -Force
+    Invoke-IfLive "Write Autounattend.xml to $SetupDir" {
+        $unattend | Out-File "$SetupDir\Autounattend.xml" -Encoding utf8 -Force
+    }
 
     # -------------------------
     # Generate bootstrap.ps1
@@ -232,32 +261,40 @@ Set-Service docker -StartupType Automatic
 docker pull mcr.microsoft.com/windows/servercore:ltsc2022
 "@
 
-    $bootstrap | Out-File "$SetupDir\bootstrap.ps1" -Encoding utf8 -Force
+    Invoke-IfLive "Write bootstrap.ps1 to $SetupDir" {
+        $bootstrap | Out-File "$SetupDir\bootstrap.ps1" -Encoding utf8 -Force
+    }
 
     # -------------------------
     # Create floppy
     # -------------------------
-    if (Test-Path $FloppyPath) { Remove-Item $FloppyPath -Force }
-    $fs = New-Object -ComObject Scripting.FileSystemObject
-    $fs.CreateTextFile($FloppyPath).Close()
+    Invoke-IfLive "Create floppy VFD $FloppyPath and copy setup files" {
+        if (Test-Path $FloppyPath) { Remove-Item $FloppyPath -Force }
+        $fs = New-Object -ComObject Scripting.FileSystemObject
+        $fs.CreateTextFile($FloppyPath).Close()
 
-    Mount-VHD -Path $FloppyPath -ReadOnly:$false | Out-Null
-    $drive = (Get-DiskImage -ImagePath $FloppyPath | Get-Volume).DriveLetter + ":"
-    Copy-Item "$SetupDir\Autounattend.xml" "$drive\Autounattend.xml"
-    Copy-Item "$SetupDir\bootstrap.ps1" "$drive\bootstrap.ps1"
-    Dismount-VHD -Path $FloppyPath
+        Mount-VHD -Path $FloppyPath -ReadOnly:$false | Out-Null
+        $drive = (Get-DiskImage -ImagePath $FloppyPath | Get-Volume).DriveLetter + ":"
+        Copy-Item "$SetupDir\Autounattend.xml" "$drive\Autounattend.xml"
+        Copy-Item "$SetupDir\bootstrap.ps1" "$drive\bootstrap.ps1"
+        Dismount-VHD -Path $FloppyPath
+    }
 
     # -------------------------
     # Create OS disk
     # -------------------------
-    if (Test-Path $VhdPath) { Remove-Item $VhdPath -Force }
-    New-VHD -Path $VhdPath -SizeBytes ($cfg.os_disk_gb * 1GB) -Dynamic | Out-Null
+    Invoke-IfLive "New-VHD OS disk $VhdPath ($($cfg.os_disk_gb) GB)" {
+        if (Test-Path $VhdPath) { Remove-Item $VhdPath -Force }
+        New-VHD -Path $VhdPath -SizeBytes ($cfg.os_disk_gb * 1GB) -Dynamic | Out-Null
+    }
 
     # -------------------------
     # Create persistent disk
     # -------------------------
-    if (Test-Path $PersistentVhdPath) { Remove-Item $PersistentVhdPath -Force }
-    New-VHD -Path $PersistentVhdPath -SizeBytes ($cfg.persistent_disk_gb * 1GB) -Dynamic | Out-Null
+    Invoke-IfLive "New-VHD persistent disk $PersistentVhdPath ($($cfg.persistent_disk_gb) GB)" {
+        if (Test-Path $PersistentVhdPath) { Remove-Item $PersistentVhdPath -Force }
+        New-VHD -Path $PersistentVhdPath -SizeBytes ($cfg.persistent_disk_gb * 1GB) -Dynamic | Out-Null
+    }
 
     # -------------------------
     # Create VM
@@ -267,22 +304,51 @@ docker pull mcr.microsoft.com/windows/servercore:ltsc2022
         return
     }
 
-    New-VM -Name $vmName -MemoryStartupBytes ($cfg.memory_gb * 1GB) -Generation 2 -VHDPath $VhdPath -Path $VmPath | Out-Null
-    Set-VM -Name $vmName -ProcessorCount $cfg.cpus
+    Invoke-IfLive "New-VM $vmName ($($cfg.memory_gb) GB RAM, $($cfg.cpus) CPUs)" {
+        New-VM -Name $vmName -MemoryStartupBytes ($cfg.memory_gb * 1GB) -Generation 2 -VHDPath $VhdPath -Path $VmPath | Out-Null
+        Set-VM -Name $vmName -ProcessorCount $cfg.cpus
 
-    Add-VMDvdDrive -VMName $vmName -Path $cfg.iso | Out-Null
-    Add-VMHardDiskDrive -VMName $vmName -Path $FloppyPath | Out-Null
-    Add-VMHardDiskDrive -VMName $vmName -Path $PersistentVhdPath | Out-Null
+        Add-VMDvdDrive -VMName $vmName -Path $cfg.iso | Out-Null
+        Add-VMHardDiskDrive -VMName $vmName -Path $FloppyPath | Out-Null
+        Add-VMHardDiskDrive -VMName $vmName -Path $PersistentVhdPath | Out-Null
+    }
 
     # Attach network
     if ($cfg.network) {
         $switchName = $stack.networks[$cfg.network].switch_name
-        Connect-VMNetworkAdapter -VMName $vmName -SwitchName $switchName
+        Invoke-IfLive "Connect-VMNetworkAdapter $vmName to switch $switchName" {
+            Connect-VMNetworkAdapter -VMName $vmName -SwitchName $switchName
+        }
     }
 
-    Set-VMFirmware -VMName $vmName -EnableSecureBoot Off
+    # -------------------------
+    # Mount shared storage disks
+    # -------------------------
+    if ($cfg.mount -and $stack.storage) {
+        foreach ($storageName in $cfg.mount) {
+            $storageCfg = $stack.storage[$storageName]
+            if (-not $storageCfg) {
+                Write-Host "WARNING: Storage '$storageName' not found in storage: section" -ForegroundColor Yellow
+                continue
+            }
+            $storagePath = $storageCfg.path
+            Invoke-IfLive "Create shared VHDX $storagePath ($($storageCfg.size_gb) GB) if missing" {
+                if (-not (Test-Path $storagePath)) {
+                    New-Item -ItemType Directory -Path (Split-Path $storagePath) -Force | Out-Null
+                    New-VHD -Path $storagePath -SizeBytes ($storageCfg.size_gb * 1GB) -Dynamic | Out-Null
+                }
+            }
+            Invoke-IfLive "Add-VMHardDiskDrive $vmName <- $storagePath" {
+                Add-VMHardDiskDrive -VMName $vmName -Path $storagePath | Out-Null
+            }
+            Write-Host "Mounted shared storage '$storageName' on $vmName"
+        }
+    }
 
-    Start-VM $vmName
+    Invoke-IfLive "Set-VMFirmware $vmName -EnableSecureBoot Off + Start-VM" {
+        Set-VMFirmware -VMName $vmName -EnableSecureBoot Off
+        Start-VM $vmName
+    }
 
     Write-Host "VM '$vmName' started and installing automatically."
 }
@@ -290,7 +356,9 @@ docker pull mcr.microsoft.com/windows/servercore:ltsc2022
 function Stop-AllVMs {
     foreach ($vm in $vms) {
         if (Get-VM -Name $vm -ErrorAction SilentlyContinue) {
-            Stop-VM -Name $vm -Force -TurnOff
+            Invoke-IfLive "Stop-VM $vm -Force -TurnOff" {
+                Stop-VM -Name $vm -Force -TurnOff
+            }
             Write-Host "Stopped $vm"
         }
     }
@@ -299,7 +367,9 @@ function Stop-AllVMs {
 function Restart-AllVMs {
     foreach ($vm in $vms) {
         if (Get-VM -Name $vm -ErrorAction SilentlyContinue) {
-            Restart-VM -Name $vm
+            Invoke-IfLive "Restart-VM $vm" {
+                Restart-VM -Name $vm
+            }
             Write-Host "Restarted $vm"
         }
     }
@@ -308,8 +378,10 @@ function Restart-AllVMs {
 function Remove-AllVMs {
     foreach ($vm in $vms) {
         if (Get-VM -Name $vm -ErrorAction SilentlyContinue) {
-            Stop-VM -Name $vm -Force -TurnOff -ErrorAction SilentlyContinue
-            Remove-VM -Name $vm -Force
+            Invoke-IfLive "Stop-VM $vm + Remove-VM $vm (persistent disk preserved)" {
+                Stop-VM -Name $vm -Force -TurnOff -ErrorAction SilentlyContinue
+                Remove-VM -Name $vm -Force
+            }
             Write-Host "Destroyed VM $vm (persistent disk preserved)"
         }
     }
@@ -515,6 +587,144 @@ function Test-AllVMs {
     }
 }
 
+function Invoke-Validate {
+    $errors = @()
+
+    # Validate VMs
+    if (-not $stack.vms) {
+        $errors += "No vms: section found in $ConfigFile"
+    } else {
+        foreach ($vmName in $stack.vms.Keys) {
+            $cfg = $stack.vms[$vmName]
+            foreach ($field in @("iso","memory_gb","cpus","os_disk_gb","persistent_disk_gb","mirantis_url")) {
+                if (-not $cfg[$field]) {
+                    $errors += "VM '$vmName': missing required field '$field'"
+                }
+            }
+            if ($cfg.network -and -not $stack.networks) {
+                $errors += "VM '$vmName': references network '$($cfg.network)' but no networks: section exists"
+            } elseif ($cfg.network -and -not $stack.networks[$cfg.network]) {
+                $errors += "VM '$vmName': references unknown network '$($cfg.network)'"
+            }
+            if ($cfg.mount) {
+                foreach ($storageName in $cfg.mount) {
+                    if (-not $stack.storage) {
+                        $errors += "VM '$vmName': references storage '$storageName' but no storage: section exists"
+                    } elseif (-not $stack.storage[$storageName]) {
+                        $errors += "VM '$vmName': references unknown storage '$storageName'"
+                    }
+                }
+            }
+        }
+    }
+
+    # Validate networks
+    if ($stack.networks) {
+        foreach ($netName in $stack.networks.Keys) {
+            $cfg = $stack.networks[$netName]
+            foreach ($field in @("type","switch_name")) {
+                if (-not $cfg[$field]) {
+                    $errors += "Network '$netName': missing required field '$field'"
+                }
+            }
+            if ($cfg.type -eq "nat") {
+                foreach ($field in @("subnet","gateway")) {
+                    if (-not $cfg[$field]) {
+                        $errors += "Network '$netName' (nat): missing required field '$field'"
+                    }
+                }
+            }
+        }
+    }
+
+    # Validate storage
+    if ($stack.storage) {
+        foreach ($storageName in $stack.storage.Keys) {
+            $cfg = $stack.storage[$storageName]
+            foreach ($field in @("path","size_gb")) {
+                if (-not $cfg[$field]) {
+                    $errors += "Storage '$storageName': missing required field '$field'"
+                }
+            }
+        }
+    }
+
+    if ($errors.Count -eq 0) {
+        Write-Host "$ConfigFile is valid." -ForegroundColor Green
+        exit 0
+    } else {
+        Write-Host "$($errors.Count) validation error(s) in ${ConfigFile}:" -ForegroundColor Red
+        foreach ($err in $errors) {
+            Write-Host "  ERROR: $err" -ForegroundColor Red
+        }
+        exit 1
+    }
+}
+
+function Mount-VMStorage {
+    param($vmName, $storageName)
+
+    if (-not (Get-VM -Name $vmName -ErrorAction SilentlyContinue)) {
+        Write-Host "VM not found: $vmName" -ForegroundColor Red
+        return
+    }
+    if (-not $stack.storage -or -not $stack.storage[$storageName]) {
+        Write-Host "Storage '$storageName' not found in storage: section" -ForegroundColor Red
+        return
+    }
+
+    $storageCfg = $stack.storage[$storageName]
+    $storagePath = $storageCfg.path
+
+    Invoke-IfLive "Create VHDX $storagePath if missing ($($storageCfg.size_gb) GB)" {
+        if (-not (Test-Path $storagePath)) {
+            New-Item -ItemType Directory -Path (Split-Path $storagePath) -Force | Out-Null
+            New-VHD -Path $storagePath -SizeBytes ($storageCfg.size_gb * 1GB) -Dynamic | Out-Null
+        }
+    }
+    Invoke-IfLive "Add-VMHardDiskDrive $vmName <- $storagePath" {
+        Add-VMHardDiskDrive -VMName $vmName -Path $storagePath | Out-Null
+    }
+    Write-Host "Mounted '$storageName' on $vmName"
+}
+
+function Dismount-VMStorage {
+    param($vmName, $storageName)
+
+    if (-not (Get-VM -Name $vmName -ErrorAction SilentlyContinue)) {
+        Write-Host "VM not found: $vmName" -ForegroundColor Red
+        return
+    }
+    if (-not $stack.storage -or -not $stack.storage[$storageName]) {
+        Write-Host "Storage '$storageName' not found in storage: section" -ForegroundColor Red
+        return
+    }
+
+    $storagePath = $stack.storage[$storageName].path
+    $drive = Get-VMHardDiskDrive -VMName $vmName | Where-Object Path -eq $storagePath
+
+    if (-not $drive) {
+        Write-Host "Storage '$storageName' is not currently mounted on $vmName" -ForegroundColor Yellow
+        return
+    }
+
+    Invoke-IfLive "Remove-VMHardDiskDrive $vmName <- $storagePath" {
+        $drive | Remove-VMHardDiskDrive
+    }
+    Write-Host "Unmounted '$storageName' from $vmName"
+}
+
+function Get-MetricsStatus {
+    $svc = Get-Service -Name "vm-metrics" -ErrorAction SilentlyContinue
+    if ($svc) {
+        Write-Host "Metrics service status: $($svc.Status)" -ForegroundColor $(if ($svc.Status -eq 'Running') { 'Green' } else { 'Yellow' })
+        Write-Host "Metrics URL: http://localhost:9090/metrics"
+    } else {
+        Write-Host "Metrics service is not installed." -ForegroundColor Yellow
+        Write-Host "Run: .\vm-metrics-install.ps1 to install it."
+    }
+}
+
 switch ($Command) {
     "up" {
         foreach ($vm in $vms) {
@@ -596,5 +806,47 @@ switch ($Command) {
 
     "health" {
         Test-AllVMs
+    }
+
+    "validate" {
+        Invoke-Validate
+    }
+
+    "version" {
+        Write-Host "vm-compose $Version"
+        Write-Host "PowerShell $($PSVersionTable.PSVersion)"
+        Write-Host "Config: $ConfigFile"
+    }
+
+    "mount" {
+        if (-not $VmName -or -not $StorageName) {
+            Write-Host "Usage: ./vm-compose.ps1 mount <vmName> <storageName>" -ForegroundColor Yellow
+        } else {
+            Mount-VMStorage $VmName $StorageName
+        }
+    }
+
+    "unmount" {
+        if (-not $VmName -or -not $StorageName) {
+            Write-Host "Usage: ./vm-compose.ps1 unmount <vmName> <storageName>" -ForegroundColor Yellow
+        } else {
+            Dismount-VMStorage $VmName $StorageName
+        }
+    }
+
+    "metrics" {
+        Get-MetricsStatus
+    }
+
+    "web" {
+        $svc = Get-Service -Name "vm-dashboard" -ErrorAction SilentlyContinue
+        if ($svc) {
+            Write-Host "Dashboard service status: $($svc.Status)" -ForegroundColor $(if ($svc.Status -eq 'Running') { 'Green' } else { 'Yellow' })
+            Write-Host "Dashboard URL: http://localhost:8080"
+        } else {
+            Write-Host "Dashboard service is not installed." -ForegroundColor Yellow
+            Write-Host "Run: .\vm-dashboard-install.ps1 to install it."
+            Write-Host "Or run directly: .\vm-dashboard.ps1"
+        }
     }
 }
