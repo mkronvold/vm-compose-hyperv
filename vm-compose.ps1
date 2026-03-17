@@ -77,9 +77,11 @@ COMMANDS
   version         Show version info
   mount <vm> <storage>    Hot-add a shared storage disk to a VM
   unmount <vm> <storage>  Remove a shared storage disk from a VM
-  metrics         Show Prometheus metrics service status
-  web             Show web dashboard service status
   note <show|add|edit> <vm>  Show, append to, or edit VM notes
+
+SERVICES
+  web [start|stop|status]     Manage the web dashboard (port 8080)
+  metrics [start|stop|status] Manage the Prometheus metrics exporter (port 9090)
 
 OPTIONS
   -DryRun         Preview changes without executing them
