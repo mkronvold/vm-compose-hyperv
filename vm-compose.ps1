@@ -110,8 +110,8 @@ $CommandHelp = @{
     "version"  = "version`n  Print version, PowerShell version, and active config file path."
     "mount"    = "mount <vm> <storageName>`n  Hot-add a shared storage VHDX (from the storage: section) to a running VM."
     "unmount"  = "unmount <vm> <storageName>`n  Remove a shared storage VHDX from a VM."
-    "metrics"  = "metrics`n  Show status of the vm-metrics Prometheus exporter service.`n  Install with: ./vm-metrics-install.ps1"
-    "web"      = "web`n  Show status of the vm-dashboard web UI service.`n  Install with: ./vm-dashboard-install.ps1  |  Run directly: ./vm-dashboard.ps1"
+    "metrics"  = "metrics [start|stop|status]`n  Manage the vm-metrics Prometheus exporter. Default: status.`n  Install with: ./vm-metrics-install.ps1"
+    "web"      = "web [start|stop|status]`n  Manage the vm-dashboard web UI. Default: status.`n  Install with: ./vm-dashboard-install.ps1  |  Run directly: ./vm-dashboard.ps1"
     "note"     = "note <show|add|edit> <vm>`n  show: Print the VM's Notes field.`n  add:  Prompt for text and append it to the Notes field.`n  edit: Open the Notes field in Notepad for full editing."
     "help"     = "help [<command>]`n  Show help. Run 'help <command>' for details on a specific command."
 }
@@ -985,15 +985,59 @@ function Dismount-VMStorage {
     Write-Host "Unmounted '$storageName' from $vmName"
 }
 
-function Get-MetricsStatus {
-    $svc = Get-Service -Name "vm-metrics" -ErrorAction SilentlyContinue
-    if ($svc) {
-        Write-Host "Metrics service status: $($svc.Status)" -ForegroundColor $(if ($svc.Status -eq 'Running') { 'Green' } else { 'Yellow' })
-        Write-Host "Metrics URL: http://localhost:9090/metrics"
-    } else {
-        Write-Host "Metrics service is not installed." -ForegroundColor Yellow
-        Write-Host "Run: .\vm-metrics-install.ps1 to install it."
+function Get-WebServiceState {
+    param([string]$Name)
+    $svc  = Get-Service       -Name $Name -ErrorAction SilentlyContinue
+    $task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+    if ($svc)  { return @{ kind = 'service'; running = ($svc.Status  -eq 'Running'); raw = $svc  } }
+    if ($task) { return @{ kind = 'task';    running = ($task.State  -eq 'Running'); raw = $task } }
+    return $null
+}
+
+function Start-WebService {
+    param([string]$Name)
+    $s = Get-WebServiceState $Name
+    if (-not $s) { Write-Host "'$Name' is not installed." -ForegroundColor Red; return }
+    if ($s.running) { Write-Host "'$Name' is already running." -ForegroundColor Green; return }
+    if ($s.kind -eq 'service') { Start-Service -Name $Name -ErrorAction SilentlyContinue }
+    else                       { Start-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 3
+    $s2 = Get-WebServiceState $Name
+    if ($s2.running) { Write-Host "'$Name' started." -ForegroundColor Green }
+    else             { Write-Host "Failed to start '$Name'." -ForegroundColor Red }
+}
+
+function Stop-WebService {
+    param([string]$Name)
+    $s = Get-WebServiceState $Name
+    if (-not $s) { Write-Host "'$Name' is not installed." -ForegroundColor Red; return }
+    if (-not $s.running) { Write-Host "'$Name' is already stopped." -ForegroundColor Yellow; return }
+    if ($s.kind -eq 'service') { Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue }
+    else                       { Stop-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 2
+    $s2 = Get-WebServiceState $Name
+    if (-not $s2.running) { Write-Host "'$Name' stopped." -ForegroundColor Green }
+    else                  { Write-Host "Failed to stop '$Name'." -ForegroundColor Red }
+}
+
+function Show-WebServiceStatus {
+    param([string]$Name, [string]$Label, [string]$Url, [string]$InstallScript)
+    $s = Get-WebServiceState $Name
+    if (-not $s) {
+        Write-Host "$Label  not installed" -ForegroundColor Yellow
+        Write-Host "  Install: .\$InstallScript" -ForegroundColor Gray
+        return
     }
+    $via    = if ($s.kind -eq 'service') { 'service' } else { 'task' }
+    $state  = if ($s.running) { 'running' } else { 'stopped' }
+    $color  = if ($s.running) { 'Green'   } else { 'Yellow'  }
+    Write-Host "$Label  $state  ($via)" -ForegroundColor $color
+    if ($s.running) { Write-Host "  $Url" -ForegroundColor Gray }
+}
+
+function Get-MetricsStatus {
+    Show-WebServiceStatus -Name 'vm-metrics' -Label 'Metrics exporter' `
+        -Url 'http://localhost:9090/metrics' -InstallScript 'vm-metrics-install.ps1'
 }
 
 # For any command, passing "help" as the vm/sub-arg shows per-command help.
@@ -1134,18 +1178,27 @@ switch ($Command) {
     }
 
     "metrics" {
-        Get-MetricsStatus
+        $subCmd = if ($VmName) { $VmName.ToLower() } else { 'status' }
+        switch ($subCmd) {
+            'start'  { Assert-Admin; Start-WebService 'vm-metrics' }
+            'stop'   { Assert-Admin; Stop-WebService  'vm-metrics' }
+            'status' { Get-MetricsStatus }
+            default  {
+                Write-Host "Usage: ./vm-compose.ps1 metrics [start|stop|status]" -ForegroundColor Yellow
+            }
+        }
     }
 
     "web" {
-        $svc = Get-Service -Name "vm-dashboard" -ErrorAction SilentlyContinue
-        if ($svc) {
-            Write-Host "Dashboard service status: $($svc.Status)" -ForegroundColor $(if ($svc.Status -eq 'Running') { 'Green' } else { 'Yellow' })
-            Write-Host "Dashboard URL: http://localhost:8080"
-        } else {
-            Write-Host "Dashboard service is not installed." -ForegroundColor Yellow
-            Write-Host "Run: .\vm-dashboard-install.ps1 to install it."
-            Write-Host "Or run directly: .\vm-dashboard.ps1"
+        $subCmd = if ($VmName) { $VmName.ToLower() } else { 'status' }
+        switch ($subCmd) {
+            'start'  { Assert-Admin; Start-WebService 'vm-dashboard' }
+            'stop'   { Assert-Admin; Stop-WebService  'vm-dashboard' }
+            'status' { Show-WebServiceStatus -Name 'vm-dashboard' -Label 'Dashboard' `
+                           -Url 'http://localhost:8080' -InstallScript 'vm-dashboard-install.ps1' }
+            default  {
+                Write-Host "Usage: ./vm-compose.ps1 web [start|stop|status]" -ForegroundColor Yellow
+            }
         }
     }
 
