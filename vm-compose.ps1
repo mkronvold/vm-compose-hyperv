@@ -167,6 +167,19 @@ function Invoke-IfLive {
     }
 }
 
+# Check for Administrator privileges (required for Hyper-V operations)
+function Assert-Admin {
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        Write-Host ""
+        Write-Host "ERROR: This command requires Administrator privileges." -ForegroundColor Red
+        Write-Host "Re-run PowerShell as Administrator and try again." -ForegroundColor Yellow
+        Write-Host ""
+        exit 1
+    }
+}
+
 if (-not (Get-Module -ListAvailable -Name powershell-yaml)) {
     Write-Host "Installing required module: powershell-yaml..." -ForegroundColor Cyan
     Install-Module powershell-yaml -Scope CurrentUser -Force -ErrorAction Stop
@@ -219,10 +232,12 @@ function Initialize-Network {
     }
 }
 
-# Auto-create networks
-if ($stack.networks) {
-    foreach ($net in $stack.networks.Keys) {
-        Initialize-Network $net $stack.networks[$net]
+# Auto-create networks (called only by commands that need it)
+function Initialize-Networks {
+    if ($stack.networks) {
+        foreach ($net in $stack.networks.Keys) {
+            Initialize-Network $net $stack.networks[$net]
+        }
     }
 }
 
@@ -936,26 +951,33 @@ if ($VmName -eq "help" -or $ExecCommand -eq "help" -or $StorageName -eq "help") 
 
 switch ($Command) {
     "up" {
+        Assert-Admin
+        Initialize-Networks
         foreach ($vm in (Resolve-TargetVMs $VmName)) {
             Build-VM $vm $stack.vms[$vm] -AutoStart
         }
     }
 
     "build" {
+        Assert-Admin
+        Initialize-Networks
         foreach ($vm in (Resolve-TargetVMs $VmName)) {
             Build-VM $vm $stack.vms[$vm]
         }
     }
 
     "down" {
+        Assert-Admin
         Stop-AllVMs $VmName
     }
 
     "restart" {
+        Assert-Admin
         Restart-AllVMs $VmName
     }
 
     "destroy" {
+        Assert-Admin
         Remove-AllVMs $VmName
     }
 
@@ -1038,6 +1060,7 @@ switch ($Command) {
     }
 
     "mount" {
+        Assert-Admin
         if (-not $VmName -or -not $StorageName) {
             Write-Host "Usage: ./vm-compose.ps1 mount <vmName> <storageName>" -ForegroundColor Yellow
         } else {
@@ -1046,6 +1069,7 @@ switch ($Command) {
     }
 
     "unmount" {
+        Assert-Admin
         if (-not $VmName -or -not $StorageName) {
             Write-Host "Usage: ./vm-compose.ps1 unmount <vmName> <storageName>" -ForegroundColor Yellow
         } else {
