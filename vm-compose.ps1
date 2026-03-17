@@ -32,7 +32,7 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","build","down","restart","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","metrics","web","help")]
+    [ValidateSet("up","build","down","restart","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","metrics","web","note","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -79,6 +79,7 @@ COMMANDS
   unmount <vm> <storage>  Remove a shared storage disk from a VM
   metrics         Show Prometheus metrics service status
   web             Show web dashboard service status
+  note <show|add|edit> <vm>  Show, append to, or edit VM notes
 
 OPTIONS
   -DryRun         Preview changes without executing them
@@ -111,6 +112,7 @@ $CommandHelp = @{
     "unmount"  = "unmount <vm> <storageName>`n  Remove a shared storage VHDX from a VM."
     "metrics"  = "metrics`n  Show status of the vm-metrics Prometheus exporter service.`n  Install with: ./vm-metrics-install.ps1"
     "web"      = "web`n  Show status of the vm-dashboard web UI service.`n  Install with: ./vm-dashboard-install.ps1  |  Run directly: ./vm-dashboard.ps1"
+    "note"     = "note <show|add|edit> <vm>`n  show: Print the VM's Notes field.`n  add:  Prompt for text and append it to the Notes field.`n  edit: Open the Notes field in Notepad for full editing."
     "help"     = "help [<command>]`n  Show help. Run 'help <command>' for details on a specific command."
 }
 
@@ -1146,6 +1148,68 @@ switch ($Command) {
             Write-Host "Or run directly: .\vm-dashboard.ps1"
         }
     }
+
+    "note" {
+        $subCmd = $VmName      # show | add | edit
+        $noteVm = $ExecCommand # vm name
+
+        if (-not $subCmd -or $subCmd -notin @("show","add","edit") -or -not $noteVm) {
+            Write-Host "Usage: ./vm-compose.ps1 note <show|add|edit> <vmName>" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "  note show <vm>   Print the VM's Notes field"
+            Write-Host "  note add  <vm>   Append text to the Notes field (prompted)"
+            Write-Host "  note edit <vm>   Open Notes in Notepad for full editing"
+            break
+        }
+
+        $vmObj = Get-VM -Name $noteVm -ErrorAction SilentlyContinue
+        if (-not $vmObj) {
+            Write-Host "VM not found: $noteVm" -ForegroundColor Red
+            break
+        }
+
+        switch ($subCmd) {
+            "show" {
+                if ($vmObj.Notes) {
+                    Write-Host ""
+                    Write-Host "Notes for '$noteVm':" -ForegroundColor Cyan
+                    Write-Host $vmObj.Notes
+                } else {
+                    Write-Host "No notes for '$noteVm'." -ForegroundColor Gray
+                }
+            }
+
+            "add" {
+                $text = Read-Host "Enter note to append"
+                if ($text) {
+                    $existing = $vmObj.Notes
+                    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm"
+                    $newNote = if ($existing) { "$existing`n[$timestamp] $text" } else { "[$timestamp] $text" }
+                    Set-VM -Name $noteVm -Notes $newNote
+                    Write-Host "Note appended to '$noteVm'." -ForegroundColor Green
+                }
+            }
+
+            "edit" {
+                $tmpFile = Join-Path $env:TEMP "$noteVm-note.txt"
+                $vmObj.Notes | Out-File $tmpFile -Encoding utf8 -Force
+                $before = Get-Item $tmpFile | Select-Object -ExpandProperty LastWriteTime
+
+                Start-Process notepad.exe $tmpFile -Wait
+
+                $after = Get-Item $tmpFile | Select-Object -ExpandProperty LastWriteTime
+                if ($after -gt $before) {
+                    $newNote = (Get-Content $tmpFile -Raw).TrimEnd()
+                    Set-VM -Name $noteVm -Notes $newNote
+                    Write-Host "Notes saved for '$noteVm'." -ForegroundColor Green
+                } else {
+                    Write-Host "No changes made." -ForegroundColor Gray
+                }
+                Remove-Item $tmpFile -Force
+            }
+        }
+    }
+
 
     "help" {
         $targetCmd = if ($VmName -and $CommandHelp.ContainsKey($VmName)) { $VmName } else { $null }
