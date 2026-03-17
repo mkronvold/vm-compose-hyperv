@@ -45,7 +45,7 @@ param(
     [switch]$Help,
     [Alias("h")][switch]$HelpShort,
     [string]$ConfigFile = "vmstack.yaml",
-    [string]$VmRoot = "D:\HyperV\VMs"
+    [string]$VmRoot = "C:\HyperV\VMs"
 )
 
 $Version = "1.1.0"
@@ -189,6 +189,9 @@ Import-Module powershell-yaml -ErrorAction Stop
 $stack = Get-Content $ConfigFile | ConvertFrom-Yaml
 $vms = $stack.vms.Keys
 
+# Allow vmstack.yaml to override the VmRoot storage path
+if ($stack.vm_root) { $VmRoot = $stack.vm_root }
+
 function Initialize-Network {
     param($name, $cfg)
 
@@ -220,7 +223,11 @@ function Initialize-Network {
             Write-Host "Creating NAT switch '$switchName'"
             Invoke-IfLive "New-VMSwitch $switchName + New-NetIPAddress $($cfg.gateway) + New-NetNat $($cfg.subnet)" {
                 New-VMSwitch -Name $switchName -SwitchType Internal | Out-Null
-                $ifIndex = (Get-NetAdapter | Where-Object Name -eq $switchName).ifIndex
+                $ifIndex = (Get-NetAdapter -Name "vEthernet ($switchName)" -ErrorAction SilentlyContinue).ifIndex
+                if (-not $ifIndex) {
+                    Write-Host "WARNING: Could not find adapter 'vEthernet ($switchName)' — skipping IP/NAT config." -ForegroundColor Yellow
+                    return
+                }
                 New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $cfg.gateway -PrefixLength 24 | Out-Null
                 New-NetNat -Name $switchName -InternalIPInterfaceAddressPrefix $cfg.subnet | Out-Null
             }
@@ -282,7 +289,15 @@ function Build-VM {
         return
     }
 
-    $VmPath = Join-Path $VmRoot $vmName
+    try {
+        $VmPath = Join-Path $VmRoot $vmName
+    } catch {
+        Write-Host ""
+        Write-Host "ERROR: VM storage root '$VmRoot' is not accessible." -ForegroundColor Red
+        Write-Host "Set 'vm_root:' in vmstack.yaml or pass -VmRoot to override." -ForegroundColor Yellow
+        Write-Host ""
+        return
+    }
     $SetupDir = Join-Path $VmPath "Setup"
     $VhdPath = Join-Path $VmPath "$vmName.vhdx"
     $PersistentVhdPath = Join-Path $VmPath "persistent-storage.vhdx"

@@ -1,5 +1,7 @@
 version: "1"
 
+# vm_root: "C:\HyperV\VMs"   # optional: override default VM storage root (default: C:\HyperV\VMs)
+
 networks:
   natnet:
     type: nat
@@ -14,7 +16,7 @@ storage:
 
 vms:
   winhost1:
-    iso: "DC:/ISO/WindowsServer2022.iso"
+    iso: "C:/ISOs/SERVER_EVAL_x64FRE_en-us.iso"
     # key: "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"   # optional product key; omit for eval ISO (180-day trial)
     # keytype: "Windows Server 2022 Standard"  # informational
     # keynotes: "use dism to convert from eval to retail"  # informational
@@ -29,7 +31,7 @@ vms:
       - shareddata
 
   winhost2:
-    iso: "C:/ISO/WindowsServer2025.iso"
+    iso: "C:/ISOs/SERVER_EVAL_x64FRE_en-us.iso"
     memory_gb: 4
     cpus: 2
     os_disk_gb: 60
