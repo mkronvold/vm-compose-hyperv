@@ -597,8 +597,12 @@ docker pull mcr.microsoft.com/windows/servercore:ltsc2022
         }
     }
 
-    Invoke-IfLive "Set-VMFirmware $vmName -EnableSecureBoot Off" {
+    Invoke-IfLive "Set-VMFirmware $vmName -EnableSecureBoot Off, boot from DVD first" {
         Set-VMFirmware -VMName $vmName -EnableSecureBoot Off
+        $dvd = Get-VMDvdDrive -VMName $vmName
+        if ($dvd) {
+            Set-VMFirmware -VMName $vmName -FirstBootDevice $dvd
+        }
     }
 
     if ($AutoStart) {
