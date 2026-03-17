@@ -355,9 +355,35 @@ function Build-VM {
         [System.Text.Encoding]::Unicode.GetBytes($adminPassword + "AdministratorPassword")
     )
 
-    # Optional product key XML
-    $productKeyXml   = if ($cfg.product_key) { "        <ProductKey>$($cfg.product_key)</ProductKey>" } else { "" }
+    # Optional product key XML (only for non-eval ISOs; eval uses DISM post-install conversion)
+    $productKeyXml   = ""  # do not inject key during setup — eval ISO installs without it
     $keyNotesComment = if ($cfg.product_notes) { "    <!-- $($cfg.product_type) | $($cfg.product_notes) -->" } else { "" }
+
+    # DISM edition-conversion block for bootstrap.ps1 (only when product_key + product_type are set)
+    $dismConversionBlock = ""
+    if ($cfg.product_key -and $cfg.product_type) {
+        $dismEdition = switch -Wildcard ($cfg.product_type.ToUpper()) {
+            "*DATACENTER*" { "ServerDatacenter" }
+            "*STANDARD*"   { "ServerStandard" }
+            default        { $null }
+        }
+        if ($dismEdition) {
+            $dismConversionBlock = @"
+
+# Convert Windows Server Evaluation to full edition, then apply license key
+Write-Host "Converting Evaluation to $($cfg.product_type)..."
+`$result = & dism.exe /Online /Set-Edition:$dismEdition /ProductKey:$($cfg.product_key) /AcceptEula /NoRestart 2>&1
+if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
+    Write-Host "Edition conversion succeeded. A reboot is required to complete."
+    # Schedule reboot after bootstrap finishes
+    Start-Sleep -Seconds 5
+    Restart-Computer -Force
+} else {
+    Write-Warning "Edition conversion failed (exit `$LASTEXITCODE). Run manually: dism /Online /Set-Edition:$dismEdition /ProductKey:$($cfg.product_key) /AcceptEula"
+}
+"@
+        }
+    }
 
     # -------------------------
     # Generate unattend.xml
@@ -500,6 +526,7 @@ Start-Service docker
 Set-Service docker -StartupType Automatic
 
 docker pull mcr.microsoft.com/windows/servercore:ltsc2022
+$dismConversionBlock
 "@
 
     Invoke-IfLive "Write bootstrap.ps1 to $SetupDir" {
