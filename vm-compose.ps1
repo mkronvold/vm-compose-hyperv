@@ -323,10 +323,10 @@ function Build-VM {
         Write-Host ""
         return
     }
-    $SetupDir = Join-Path $VmPath "Setup"
-    $VhdPath = Join-Path $VmPath "$vmName.vhdx"
+    $SetupDir       = Join-Path $VmPath "Setup"
+    $VhdPath        = Join-Path $VmPath "$vmName.vhdx"
     $PersistentVhdPath = Join-Path $VmPath "persistent-storage.vhdx"
-    $UnattendVhdPath = Join-Path $VmPath "unattend.vhdx"
+    $AnswerIsoPath  = Join-Path $VmPath "answer.iso"
 
     Invoke-IfLive "New-Item Directory $VmPath + $SetupDir" {
         New-Item -ItemType Directory -Path $VmPath -Force | Out-Null
@@ -356,15 +356,16 @@ function Build-VM {
     )
 
     # Optional product key XML
-    $productKeyXml   = if ($cfg.key)      { "        <ProductKey>$($cfg.key)</ProductKey>" } else { "" }
-    $keyNotesComment = if ($cfg.keynotes) { "    <!-- Key: $($cfg.keytype) | $($cfg.keynotes) -->" } else { "" }
+    $productKeyXml   = if ($cfg.product_key) { "        <ProductKey>$($cfg.product_key)</ProductKey>" } else { "" }
+    $keyNotesComment = if ($cfg.product_notes) { "    <!-- $($cfg.product_type) | $($cfg.product_notes) -->" } else { "" }
 
     # -------------------------
     # Generate unattend.xml
     # -------------------------
     $unattend = @"
 <?xml version="1.0" encoding="utf-8"?>
-<unattend xmlns="urn:schemas-microsoft-com:unattend">
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
   <settings pass="windowsPE">
     <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <ImageInstall>
@@ -506,29 +507,24 @@ docker pull mcr.microsoft.com/windows/servercore:ltsc2022
     }
 
     # -------------------------
-    # Create unattend VHDX
+    # Create answer ISO (Windows Setup scans all optical drives for Autounattend.xml)
     # -------------------------
-    Invoke-IfLive "Create unattend.vhdx and copy setup files" {
-        if (Test-Path $UnattendVhdPath) { Remove-Item $UnattendVhdPath -Force }
-
-        New-VHD -Path $UnattendVhdPath -SizeBytes 32MB -Dynamic | Out-Null
-        Mount-VHD -Path $UnattendVhdPath | Out-Null
-
-        $disk = Get-DiskImage -ImagePath $UnattendVhdPath | Get-Disk
-        Initialize-Disk -Number $disk.Number -PartitionStyle MBR -PassThru |
-            New-Partition -UseMaximumSize -AssignDriveLetter |
-            Format-Volume -FileSystem FAT -NewFileSystemLabel "Unattend" -Confirm:$false | Out-Null
-
-        Start-Sleep -Milliseconds 800
-
-        $vol = Get-DiskImage -ImagePath $UnattendVhdPath | Get-Disk |
-               Get-Partition | Where-Object { $_.Type -ne "Reserved" } | Get-Volume
-        $driveLetter = $vol.DriveLetter
-
-        Copy-Item "$SetupDir\Autounattend.xml" "${driveLetter}:\Autounattend.xml" -Force
-        Copy-Item "$SetupDir\bootstrap.ps1"    "${driveLetter}:\bootstrap.ps1"    -Force
-
-        Dismount-VHD -Path $UnattendVhdPath
+    Invoke-IfLive "Create answer.iso from setup files" {
+        if (Test-Path $AnswerIsoPath) { Remove-Item $AnswerIsoPath -Force }
+        $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
+        $fsi.FileSystemsToCreate = 4       # Joliet
+        $fsi.VolumeName = "Unattend"
+        $fsi.Root.AddTree($SetupDir, $false)
+        $resultImg = $fsi.CreateResultImage()
+        $stream = $resultImg.ImageStream
+        $adoStream = New-Object -ComObject ADODB.Stream
+        $adoStream.Type = 1  # Binary
+        $adoStream.Open()
+        $adoStream.CopyFrom($stream)
+        $adoStream.Position = 0
+        $adoStream.SaveToFile($AnswerIsoPath, 2)
+        $adoStream.Close()
+        Write-Host "Created answer.iso ($([math]::Round((Get-Item $AnswerIsoPath).Length/1KB)) KB)"
     }
 
     # -------------------------
@@ -555,7 +551,7 @@ docker pull mcr.microsoft.com/windows/servercore:ltsc2022
         Set-VM -Name $vmName -ProcessorCount $cfg.cpus
 
         Add-VMDvdDrive -VMName $vmName -Path $cfg.iso | Out-Null
-        Add-VMHardDiskDrive -VMName $vmName -Path $UnattendVhdPath | Out-Null
+        Add-VMDvdDrive -VMName $vmName -Path $AnswerIsoPath | Out-Null
         Add-VMHardDiskDrive -VMName $vmName -Path $PersistentVhdPath | Out-Null
     }
 
@@ -608,6 +604,21 @@ docker pull mcr.microsoft.com/windows/servercore:ltsc2022
 
     if ($AutoStart) {
         Invoke-IfLive "Start-VM $vmName" { Start-VM $vmName }
+        # Auto-press Enter to pass "Press any key to boot from CD/DVD" prompt
+        Write-Host "Waiting for DVD boot prompt..." -ForegroundColor Gray
+        Start-Sleep -Seconds 6
+        try {
+            $vmCim = Get-CimInstance -Namespace 'root/virtualization/v2' -ClassName 'Msvm_ComputerSystem' -Filter "ElementName='$vmName'" -ErrorAction Stop
+            $kbd   = Get-CimAssociatedInstance -InputObject $vmCim -ResultClassName 'Msvm_Keyboard' -ErrorAction Stop
+            # Send a few keypresses to cover the timing window
+            1..4 | ForEach-Object {
+                Invoke-CimMethod -InputObject $kbd -MethodName 'TypeKey' -Arguments @{ keyCode = 13 } | Out-Null
+                Start-Sleep -Milliseconds 500
+            }
+            Write-Host "Sent keypress — unattended install should begin." -ForegroundColor Green
+        } catch {
+            Write-Host "Note: Could not auto-press DVD boot key. Open VM console and press Enter if setup doesn't start." -ForegroundColor Yellow
+        }
         Write-Host "VM '$vmName' started and installing automatically."
     } else {
         Write-Host "VM '$vmName' built. Run 'up' to start it." -ForegroundColor Cyan
