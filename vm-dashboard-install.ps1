@@ -56,13 +56,16 @@ if (Get-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue) {
 Wait-PortFree -Port 8080
 
 # ── Ensure required modules are installed AllUsers (for SYSTEM account) ────
-foreach ($mod in @('Pode','powershell-yaml')) {
+# Run installs in a subprocess — the current session may already have these
+# modules loaded, which causes "in use" warnings and failed overwrites.
+foreach ($mod in @('Pode', 'powershell-yaml')) {
     $allUsers = Get-Module -ListAvailable $mod |
                 Where-Object { $_.ModuleBase -notmatch [regex]::Escape($env:USERPROFILE) }
     if (-not $allUsers) {
         Write-Host "Installing $mod (AllUsers)..." -ForegroundColor Cyan
-        try { Install-Module $mod -Scope AllUsers -Force -AllowClobber -ErrorAction Stop }
-        catch { Write-Warning "Could not install $mod AllUsers: $_" }
+        $out = & $PwshPath -NonInteractive -ExecutionPolicy Bypass -Command `
+            "Install-Module '$mod' -Scope AllUsers -Force -AllowClobber" 2>&1
+        if ($LASTEXITCODE -ne 0) { Write-Warning "Could not install ${mod}: $out" }
     }
 }
 
