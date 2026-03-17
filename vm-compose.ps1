@@ -679,7 +679,7 @@ function Get-AllVMStatus {
             VM        = $vm
             State     = $info.State
             CPU       = $info.ProcessorCount
-            MemoryGB  = [math]::Round($info.MemoryAssigned / 1GB, 2)
+            MemoryGB  = [math]::Round($(if ($info.MemoryAssigned -gt 0) { $info.MemoryAssigned } else { $info.MemoryStartup }) / 1GB, 2)
             IP        = $ip
             Uptime    = if ($info.Uptime) { $info.Uptime.ToString() } else { "-" }
         }
@@ -706,7 +706,7 @@ function Get-VMDetails {
         Name        = $vm.Name
         State       = $vm.State
         CPUCount    = $vm.ProcessorCount
-        MemoryGB    = [math]::Round($vm.MemoryAssigned / 1GB, 2)
+        MemoryGB    = "$([math]::Round($(if ($vm.MemoryAssigned -gt 0) { $vm.MemoryAssigned } else { $vm.MemoryStartup }) / 1GB, 2))$(if ($vm.MemoryAssigned -eq 0) { ' (configured; 0 assigned while Off)' } else { ' (assigned)' })"
         Uptime      = $vm.Uptime.ToString()
         Switches    = $switches
         IPAddresses = $ips
