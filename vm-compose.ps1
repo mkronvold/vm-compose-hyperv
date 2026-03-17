@@ -80,8 +80,8 @@ COMMANDS
   note <show|add|edit> <vm>  Show, append to, or edit VM notes
 
 SERVICES
-  web [start|stop|status|remove]     Manage the web dashboard (port 8080)
-  metrics [start|stop|status|remove] Manage the Prometheus metrics exporter (port 9090)
+  web [install|start|stop|status|remove]     Manage the web dashboard (port 8080)
+  metrics [install|start|stop|status|remove] Manage the Prometheus metrics exporter (port 9090)
 
 OPTIONS
   -DryRun         Preview changes without executing them
@@ -112,8 +112,8 @@ $CommandHelp = @{
     "version"  = "version`n  Print version, PowerShell version, and active config file path."
     "mount"    = "mount <vm> <storageName>`n  Hot-add a shared storage VHDX (from the storage: section) to a running VM."
     "unmount"  = "unmount <vm> <storageName>`n  Remove a shared storage VHDX from a VM."
-    "metrics"  = "metrics [start|stop|status|remove]`n  Manage the vm-metrics Prometheus exporter. Default: status.`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-metrics-install.ps1"
-    "web"      = "web [start|stop|status|remove]`n  Manage the vm-dashboard web UI. Default: status.`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-dashboard-install.ps1  |  Run directly: ./vm-dashboard.ps1"
+    "metrics"  = "metrics [install|start|stop|status|remove]`n  Manage the vm-metrics Prometheus exporter. Default: status.`n  install: run vm-metrics-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-metrics-install.ps1"
+    "web"      = "web [install|start|stop|status|remove]`n  Manage the vm-dashboard web UI. Default: status.`n  install: run vm-dashboard-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-dashboard-install.ps1  |  Run directly: ./vm-dashboard.ps1"
     "note"     = "note <show|add|edit> <vm>`n  show: Print the VM's Notes field.`n  add:  Prompt for text and append it to the Notes field.`n  edit: Open the Notes field in Notepad for full editing."
     "help"     = "help [<command>]`n  Show help. Run 'help <command>' for details on a specific command."
 }
@@ -1214,12 +1214,13 @@ switch ($Command) {
     "metrics" {
         $subCmd = if ($VmName) { $VmName.ToLower() } else { 'status' }
         switch ($subCmd) {
-            'start'  { Assert-Admin; Start-WebService 'vm-metrics' }
-            'stop'   { Assert-Admin; Stop-WebService  'vm-metrics' }
-            'remove' { Remove-WebService 'vm-metrics' 'Metrics exporter' }
-            'status' { Get-MetricsStatus }
-            default  {
-                Write-Host "Usage: ./vm-compose.ps1 metrics [start|stop|status|remove]" -ForegroundColor Yellow
+            'install' { Assert-Admin; & "$PSScriptRoot\vm-metrics-install.ps1" }
+            'start'   { Assert-Admin; Start-WebService 'vm-metrics' }
+            'stop'    { Assert-Admin; Stop-WebService  'vm-metrics' }
+            'remove'  { Remove-WebService 'vm-metrics' 'Metrics exporter' }
+            'status'  { Get-MetricsStatus }
+            default   {
+                Write-Host "Usage: ./vm-compose.ps1 metrics [install|start|stop|status|remove]" -ForegroundColor Yellow
             }
         }
     }
@@ -1227,13 +1228,14 @@ switch ($Command) {
     "web" {
         $subCmd = if ($VmName) { $VmName.ToLower() } else { 'status' }
         switch ($subCmd) {
-            'start'  { Assert-Admin; Start-WebService 'vm-dashboard' }
-            'stop'   { Assert-Admin; Stop-WebService  'vm-dashboard' }
+            'install' { Assert-Admin; & "$PSScriptRoot\vm-dashboard-install.ps1" }
+            'start'   { Assert-Admin; Start-WebService 'vm-dashboard' }
+            'stop'    { Assert-Admin; Stop-WebService  'vm-dashboard' }
             'remove' { Remove-WebService 'vm-dashboard' 'Dashboard' }
             'status' { Show-WebServiceStatus -Name 'vm-dashboard' -Label 'Dashboard' `
                            -Url 'http://localhost:8080' -InstallScript 'vm-dashboard-install.ps1' }
             default  {
-                Write-Host "Usage: ./vm-compose.ps1 web [start|stop|status|remove]" -ForegroundColor Yellow
+                Write-Host "Usage: ./vm-compose.ps1 web [install|start|stop|status|remove]" -ForegroundColor Yellow
             }
         }
     }
