@@ -24,6 +24,20 @@ $logPath     = Join-Path $PSScriptRoot "vm-dashboard.log"
 $errPath     = Join-Path $PSScriptRoot "vm-dashboard-error.log"
 
 # ── Stop and remove any existing installation ──────────────────────────────
+function Wait-PortFree {
+    param([int]$Port, [int]$TimeoutSec = 15)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $pids = (netstat -ano | Select-String "\s:$Port\s") -replace '.*\s(\d+)$','$1' |
+                Select-Object -Unique | Where-Object { $_ -match '^\d+$' -and $_ -ne '0' }
+        if (-not $pids) { return }
+        foreach ($p in $pids) {
+            Stop-Process -Id ([int]$p) -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
     Write-Host "Stopping existing service '$ServiceName'..." -ForegroundColor Yellow
     Stop-Service  -Name $ServiceName -Force -ErrorAction SilentlyContinue
@@ -36,10 +50,10 @@ if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
 }
 if (Get-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue) {
     Write-Host "Stopping existing task '$ServiceName'..." -ForegroundColor Yellow
-    Stop-ScheduledTask    -TaskName $ServiceName -ErrorAction SilentlyContinue
+    Stop-ScheduledTask       -TaskName $ServiceName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $ServiceName -Confirm:$false
-    Start-Sleep -Seconds 2
 }
+Wait-PortFree -Port 8080
 
 # ── Ensure required modules are installed AllUsers (for SYSTEM account) ────
 foreach ($mod in @('Pode','powershell-yaml')) {
