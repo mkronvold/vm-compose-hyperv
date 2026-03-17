@@ -56,28 +56,28 @@ if (Get-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue) {
 Wait-PortFree -Port 8080
 
 # ── Ensure required modules are installed AllUsers (for SYSTEM account) ────
-# Run installs in a subprocess — the current session may already have these
-# modules loaded, which causes "in use" warnings and failed overwrites.
+# Must run directly in this process (elevated). Subprocess loses elevation.
 foreach ($mod in @('Pode', 'powershell-yaml')) {
     $allUsers = Get-Module -ListAvailable $mod |
                 Where-Object { $_.ModuleBase -notmatch [regex]::Escape($env:USERPROFILE) }
-    if (-not $allUsers) {
+    if ($allUsers) {
+        Write-Host "$mod already installed AllUsers: $($allUsers.ModuleBase)" -ForegroundColor Green
+    } else {
         Write-Host "Installing $mod (AllUsers)..." -ForegroundColor Cyan
-        $out = & $PwshPath -NonInteractive -ExecutionPolicy Bypass -Command `
-            "Install-Module '$mod' -Scope AllUsers -Force -AllowClobber" 2>&1
-        if ($LASTEXITCODE -ne 0) { Write-Warning "Could not install ${mod}: $out" }
-
-        # Verify it landed in AllUsers
-        $check = & $PwshPath -NonInteractive -Command `
-            "(Get-Module -ListAvailable '$mod' | Where-Object { `$_.ModuleBase -notmatch [regex]::Escape(`$env:USERPROFILE) }).ModuleBase" 2>&1
+        try {
+            Install-Module $mod -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+        } catch {
+            Write-Warning "Install-Module failed for ${mod}: $_"
+        }
+        # Verify
+        $check = Get-Module -ListAvailable $mod |
+                 Where-Object { $_.ModuleBase -notmatch [regex]::Escape($env:USERPROFILE) }
         if ($check) {
-            Write-Host "  $mod installed at: $check" -ForegroundColor Green
+            Write-Host "  $mod installed at: $($check.ModuleBase)" -ForegroundColor Green
         } else {
             Write-Warning "$mod was NOT installed to AllUsers — dashboard may fail when running as SYSTEM."
             Write-Warning "Run manually as admin: Install-Module $mod -Scope AllUsers -Force"
         }
-    } else {
-        Write-Host "$mod already installed AllUsers: $($allUsers.ModuleBase)" -ForegroundColor Green
     }
 }
 

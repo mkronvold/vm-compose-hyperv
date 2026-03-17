@@ -52,15 +52,14 @@ Start-PodeServer -Threads 2 {
     Add-PodeEndpoint -Address localhost -Port $Port -Protocol Http
 
     # Share modules and config path with all route runspaces
-    Add-PodeModule -Name 'powershell-yaml'
-    Add-PodeModule -Name 'Hyper-V'
-    Set-PodeState  -Name 'ConfigFile' -Value $ConfigFile
+    Set-PodeState -Name 'ConfigFile' -Value $ConfigFile
 
     # -------------------------------------------------------
     # GET / — dashboard
     # -------------------------------------------------------
     Add-PodeRoute -Method Get -Path "/" -ScriptBlock {
         try {
+            Import-Module powershell-yaml -ErrorAction Stop
             $cfgFile = Get-PodeState -Name 'ConfigFile'
             $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
 
@@ -233,6 +232,7 @@ $($_.ScriptStackTrace)</pre>
     # -------------------------------------------------------
     Add-PodeRoute -Method Get -Path "/api/vms" -ScriptBlock {
         try {
+            Import-Module powershell-yaml -ErrorAction Stop
             $cfgFile = Get-PodeState -Name 'ConfigFile'
             $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
             $rows = foreach ($vmName in $stack.vms.Keys) {
