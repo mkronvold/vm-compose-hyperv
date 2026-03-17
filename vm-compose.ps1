@@ -87,7 +87,7 @@ OPTIONS
 "@
 
 $CommandHelp = @{
-    "up"       = "up [-DryRun]`n  Build and START all VMs defined in vmstack.yaml.`n  Creates OS disk, persistent disk, floppy, unattend.xml, bootstrap.ps1,`n  attaches networks and shared storage, then starts the VM.`n  If a VM already exists, starts it if stopped."
+    "up"       = "up [<vm>] [-DryRun]`n  Build and START VMs defined in vmstack.yaml.`n  Omit <vm> to target all; specify a VM name to target one.`n  Creates OS disk, persistent disk, unattend.vhdx, unattend.xml, bootstrap.ps1,`n  attaches networks and shared storage, then starts the VM.`n  If a VM already exists, starts it if stopped."
     "build"    = "build [-DryRun]`n  Provision all VMs (create disks, VM definition) WITHOUT starting them.`n  If a VM already exists, reports its state and does nothing."
     "down"     = "down [-DryRun]`n  Stop all VMs (forced power-off)."
     "restart"  = "restart [-DryRun]`n  Restart all VMs."
@@ -301,7 +301,7 @@ function Build-VM {
     $SetupDir = Join-Path $VmPath "Setup"
     $VhdPath = Join-Path $VmPath "$vmName.vhdx"
     $PersistentVhdPath = Join-Path $VmPath "persistent-storage.vhdx"
-    $FloppyPath = Join-Path $VmPath "autounattend.vfd"
+    $UnattendVhdPath = Join-Path $VmPath "unattend.vhdx"
 
     Invoke-IfLive "New-Item Directory $VmPath + $SetupDir" {
         New-Item -ItemType Directory -Path $VmPath -Force | Out-Null
@@ -402,8 +402,15 @@ $keyNotesComment
     <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <ComputerName>$vmName</ComputerName>
     </component>
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>powershell -Command "New-Item C:\Setup -ItemType Directory -Force; `$v = Get-Volume -FileSystemLabel Unattend -EA SilentlyContinue; if (`$v) { Copy-Item (`$v.DriveLetter + ':\bootstrap.ps1') C:\Setup\bootstrap.ps1 -Force }"</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
   </settings>
-
   <settings pass="oobeSystem">
     <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <OOBE>
@@ -474,18 +481,29 @@ docker pull mcr.microsoft.com/windows/servercore:ltsc2022
     }
 
     # -------------------------
-    # Create floppy
+    # Create unattend VHDX
     # -------------------------
-    Invoke-IfLive "Create floppy VFD $FloppyPath and copy setup files" {
-        if (Test-Path $FloppyPath) { Remove-Item $FloppyPath -Force }
-        $fs = New-Object -ComObject Scripting.FileSystemObject
-        $fs.CreateTextFile($FloppyPath).Close()
+    Invoke-IfLive "Create unattend.vhdx and copy setup files" {
+        if (Test-Path $UnattendVhdPath) { Remove-Item $UnattendVhdPath -Force }
 
-        Mount-VHD -Path $FloppyPath -ReadOnly:$false | Out-Null
-        $drive = (Get-DiskImage -ImagePath $FloppyPath | Get-Volume).DriveLetter + ":"
-        Copy-Item "$SetupDir\Autounattend.xml" "$drive\Autounattend.xml"
-        Copy-Item "$SetupDir\bootstrap.ps1" "$drive\bootstrap.ps1"
-        Dismount-VHD -Path $FloppyPath
+        New-VHD -Path $UnattendVhdPath -SizeBytes 32MB -Dynamic | Out-Null
+        Mount-VHD -Path $UnattendVhdPath | Out-Null
+
+        $disk = Get-DiskImage -ImagePath $UnattendVhdPath | Get-Disk
+        Initialize-Disk -Number $disk.Number -PartitionStyle MBR -PassThru |
+            New-Partition -UseMaximumSize -AssignDriveLetter |
+            Format-Volume -FileSystem FAT -NewFileSystemLabel "Unattend" -Confirm:$false | Out-Null
+
+        Start-Sleep -Milliseconds 800
+
+        $vol = Get-DiskImage -ImagePath $UnattendVhdPath | Get-Disk |
+               Get-Partition | Where-Object { $_.Type -ne "Reserved" } | Get-Volume
+        $driveLetter = $vol.DriveLetter
+
+        Copy-Item "$SetupDir\Autounattend.xml" "${driveLetter}:\Autounattend.xml" -Force
+        Copy-Item "$SetupDir\bootstrap.ps1"    "${driveLetter}:\bootstrap.ps1"    -Force
+
+        Dismount-VHD -Path $UnattendVhdPath
     }
 
     # -------------------------
@@ -512,7 +530,7 @@ docker pull mcr.microsoft.com/windows/servercore:ltsc2022
         Set-VM -Name $vmName -ProcessorCount $cfg.cpus
 
         Add-VMDvdDrive -VMName $vmName -Path $cfg.iso | Out-Null
-        Add-VMHardDiskDrive -VMName $vmName -Path $FloppyPath | Out-Null
+        Add-VMHardDiskDrive -VMName $vmName -Path $UnattendVhdPath | Out-Null
         Add-VMHardDiskDrive -VMName $vmName -Path $PersistentVhdPath | Out-Null
     }
 
