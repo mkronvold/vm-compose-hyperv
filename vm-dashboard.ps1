@@ -169,7 +169,7 @@ $($_.ScriptStackTrace)</pre>
             $snapList  = ($snaps.Name        | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
             $macList   = ($adapters | ForEach-Object {
                 $mac = $_.MacAddress -replace '(..)(?!$)','$1:'
-                "<li class='list-group-item'><code>$mac</code>&nbsp;<span class='text-muted small'>$($_.Name)</span></li>"
+                "<li class='list-group-item'><code>$mac</code></li>"
             }) -join ""
             $swList    = ($adapters | ForEach-Object {
                 "<li class='list-group-item'>$($_.SwitchName)&nbsp;<span class='text-muted small'>$($_.Name)</span></li>"
