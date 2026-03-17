@@ -4,6 +4,7 @@
 
 .USAGE
     ./vm-compose.ps1 up [-DryRun]
+    ./vm-compose.ps1 build [-DryRun]
     ./vm-compose.ps1 down [-DryRun]
     ./vm-compose.ps1 restart [-DryRun]
     ./vm-compose.ps1 destroy [-DryRun]
@@ -31,7 +32,7 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","down","restart","destroy","status","inspect","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","metrics","web","help")]
+    [ValidateSet("up","build","down","restart","destroy","status","inspect","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","metrics","web","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -56,7 +57,7 @@ USAGE
   ./vm-compose.ps1 <command> [options]
 
 COMMANDS
-  up              Build and start all VMs
+  up / build      Build and start all VMs
   down            Stop all VMs
   restart         Restart all VMs
   destroy         Delete VM definitions (persistent disks preserved)
@@ -84,7 +85,8 @@ OPTIONS
 "@
 
 $CommandHelp = @{
-    "up"       = "up [-DryRun]`n  Build and start all VMs defined in vmstack.yaml.`n  Creates OS disk, persistent disk, floppy, unattend.xml, bootstrap.ps1,`n  attaches networks and shared storage, then starts the VM."
+    "up"       = "up / build [-DryRun]`n  Build and start all VMs defined in vmstack.yaml.`n  Creates OS disk, persistent disk, floppy, unattend.xml, bootstrap.ps1,`n  attaches networks and shared storage, then starts the VM."
+    "build"    = "up / build [-DryRun]`n  Alias for 'up'. Build and start all VMs defined in vmstack.yaml."
     "down"     = "down [-DryRun]`n  Stop all VMs (forced power-off)."
     "restart"  = "restart [-DryRun]`n  Restart all VMs."
     "destroy"  = "destroy [-DryRun]`n  Delete VM definitions. Persistent storage VHDXes are preserved."
@@ -841,6 +843,12 @@ if ($VmName -eq "help" -or $ExecCommand -eq "help" -or $StorageName -eq "help") 
 
 switch ($Command) {
     "up" {
+        foreach ($vm in $vms) {
+            Build-VM $vm $stack.vms[$vm]
+        }
+    }
+
+    "build" {
         foreach ($vm in $vms) {
             Build-VM $vm $stack.vms[$vm]
         }
