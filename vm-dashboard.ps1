@@ -47,96 +47,57 @@ if (-not (Test-Path $ConfigFile)) {
     exit 1
 }
 
-# Helper scriptblocks — passed via $using: into Pode route runspaces
-$fnGetVMList = {
-    param($cfgFile)
-    Import-Module powershell-yaml -ErrorAction SilentlyContinue
-    $stack = Get-Content $cfgFile | ConvertFrom-Yaml
-    $rows = foreach ($vmName in $stack.vms.Keys) {
-        $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
-        if (-not $vm) {
-            [ordered]@{ name=$vmName; state="Not Created"; cpu="-"; memoryGB="-"; ip="-"; uptime="-" }
-            continue
-        }
-        $ip = (Get-VMNetworkAdapter -VMName $vmName).IPAddresses |
-              Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' } | Select-Object -First 1
-        $mem = if ($vm.MemoryAssigned -gt 0) { $vm.MemoryAssigned } else { $vm.MemoryStartup }
-        [ordered]@{
-            name     = $vmName
-            state    = $vm.State.ToString()
-            cpu      = "$($vm.CPUUsage)%"
-            memoryGB = [math]::Round($mem / 1GB, 2)
-            ip       = if ($ip) { $ip } else { "-" }
-            uptime   = if ($vm.Uptime -and $vm.Uptime.TotalSeconds -gt 0) { $vm.Uptime.ToString("dd\d\ hh\:mm\:ss") } else { "-" }
-        }
-    }
-    return @($rows)
-}
-
-$fnGetVMDetail = {
-    param($vmName)
-    $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
-    if (-not $vm) { return $null }
-    $adapters = Get-VMNetworkAdapter -VMName $vmName
-    $disks    = Get-VMHardDiskDrive -VMName $vmName
-    $mem = if ($vm.MemoryAssigned -gt 0) { $vm.MemoryAssigned } else { $vm.MemoryStartup }
-    return [ordered]@{
-        name        = $vm.Name
-        state       = $vm.State.ToString()
-        cpuCount    = $vm.ProcessorCount
-        memoryGB    = [math]::Round($mem / 1GB, 2)
-        uptime      = if ($vm.Uptime -and $vm.Uptime.TotalSeconds -gt 0) { $vm.Uptime.ToString() } else { "-" }
-        switches    = @($adapters.SwitchName)
-        ipAddresses = @($adapters.IPAddresses | Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' })
-        disks       = @($disks.Path)
-        generation  = $vm.Generation
-        checkpoints = @((Get-VMSnapshot -VMName $vmName -ErrorAction SilentlyContinue).Name)
-        notes       = $vm.Notes
-    }
-}
-
-$fnStateColor = {
-    param($state)
-    switch ($state) {
-        "Running"    { "success" }
-        "Off"        { "secondary" }
-        "Saved"      { "info" }
-        "Paused"     { "warning" }
-        default      { "danger" }
-    }
-}
-
 Start-PodeServer -Threads 2 {
 
     Add-PodeEndpoint -Address localhost -Port $Port -Protocol Http
+
+    # Share modules and config path with all route runspaces
+    Add-PodeModule -Name 'powershell-yaml'
+    Add-PodeModule -Name 'Hyper-V'
+    Set-PodeState  -Name 'ConfigFile' -Value $ConfigFile
 
     # -------------------------------------------------------
     # GET / — dashboard
     # -------------------------------------------------------
     Add-PodeRoute -Method Get -Path "/" -ScriptBlock {
-        $vms = & $using:fnGetVMList $using:ConfigFile
-        $stateColor = $using:fnStateColor
-        $rows = ""
-        foreach ($vm in $vms) {
-            $color = & $stateColor $vm.state
-            $rows += @"
-            <tr>
-              <td><a href="/vm/$($vm.name)">$($vm.name)</a></td>
-              <td><span class="badge bg-$color">$($vm.state)</span></td>
-              <td>$($vm.cpu)</td>
-              <td>$($vm.memoryGB) GB</td>
-              <td>$($vm.ip)</td>
-              <td>$($vm.uptime)</td>
-              <td>
-                <form method="post" action="/vm/$($vm.name)/start"   style="display:inline"><button class="btn btn-sm btn-success">Start</button></form>
-                <form method="post" action="/vm/$($vm.name)/stop"    style="display:inline"><button class="btn btn-sm btn-warning">Stop</button></form>
-                <form method="post" action="/vm/$($vm.name)/restart" style="display:inline"><button class="btn btn-sm btn-info">Restart</button></form>
-              </td>
-            </tr>
-"@
-        }
+        try {
+            $cfgFile = Get-PodeState -Name 'ConfigFile'
+            $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
 
-        Write-PodeHtmlResponse -Value @"
+            $rows = ""
+            foreach ($vmName in $stack.vms.Keys) {
+                $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+                if (-not $vm) {
+                    $rows += "<tr><td><a href='/vm/$vmName'>$vmName</a></td><td><span class='badge bg-secondary'>Not Created</span></td><td>-</td><td>-</td><td>-</td><td>-</td><td></td></tr>"
+                    continue
+                }
+                $ip  = (Get-VMNetworkAdapter -VMName $vmName).IPAddresses |
+                       Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' } | Select-Object -First 1
+                $mem = if ($vm.MemoryAssigned -gt 0) { $vm.MemoryAssigned } else { $vm.MemoryStartup }
+                $memGB  = [math]::Round($mem / 1GB, 2)
+                $uptime = if ($vm.Uptime -and $vm.Uptime.TotalSeconds -gt 0) { $vm.Uptime.ToString("dd\d\ hh\:mm\:ss") } else { "-" }
+                $color  = switch ($vm.State.ToString()) {
+                    "Running" { "success" } "Off" { "secondary" } "Saved" { "info" }
+                    "Paused"  { "warning" } default { "danger" }
+                }
+                $rows += @"
+                <tr>
+                  <td><a href="/vm/$vmName">$vmName</a></td>
+                  <td><span class="badge bg-$color">$($vm.State)</span></td>
+                  <td>$($vm.CPUUsage)%</td>
+                  <td>$memGB GB</td>
+                  <td>$(if ($ip) { $ip } else { '-' })</td>
+                  <td>$uptime</td>
+                  <td>
+                    <form method="post" action="/vm/$vmName/start"   style="display:inline"><button class="btn btn-sm btn-success">Start</button></form>
+                    <form method="post" action="/vm/$vmName/stop"    style="display:inline"><button class="btn btn-sm btn-warning">Stop</button></form>
+                    <form method="post" action="/vm/$vmName/restart" style="display:inline"><button class="btn btn-sm btn-info">Restart</button></form>
+                  </td>
+                </tr>
+"@
+            }
+
+            Write-PodeHtmlResponse -Value @"
 <!doctype html>
 <html lang="en">
 <head>
@@ -160,63 +121,90 @@ Start-PodeServer -Threads 2 {
 </body>
 </html>
 "@
+        } catch {
+            Write-PodeHtmlResponse -StatusCode 500 -Value @"
+<!doctype html><html><head><title>500 — Dashboard Error</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+</head><body class="bg-light"><div class="container mt-4">
+<h2 class="text-danger">Dashboard Error</h2>
+<pre class="bg-white p-3 border rounded">$($_.Exception.Message)
+
+$($_.ScriptStackTrace)</pre>
+<a href="/" class="btn btn-outline-secondary mt-2">Retry</a>
+</div></body></html>
+"@
+        }
     }
 
     # -------------------------------------------------------
     # GET /vm/:name — detail page
     # -------------------------------------------------------
     Add-PodeRoute -Method Get -Path "/vm/:name" -ScriptBlock {
-        $vmName = $WebEvent.Parameters['name']
-        $vm = & $using:fnGetVMDetail $vmName
-        if (-not $vm) {
-            Write-PodeHtmlResponse -StatusCode 404 -Value "<h3>VM '$vmName' not found</h3>"
-            return
-        }
+        try {
+            $vmName = $WebEvent.Parameters['name']
+            $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+            if (-not $vm) {
+                Write-PodeHtmlResponse -StatusCode 404 -Value "<h3>VM '$vmName' not found</h3>"
+                return
+            }
 
-        $color      = & $using:fnStateColor $vm.state
-        $diskList   = ($vm.disks       | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
-        $ipList     = ($vm.ipAddresses | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
-        $snapList   = ($vm.checkpoints | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
-        $switchList = ($vm.switches    | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
+            $adapters = Get-VMNetworkAdapter -VMName $vmName
+            $disks    = Get-VMHardDiskDrive -VMName $vmName
+            $snaps    = Get-VMSnapshot -VMName $vmName -ErrorAction SilentlyContinue
+            $mem      = if ($vm.MemoryAssigned -gt 0) { $vm.MemoryAssigned } else { $vm.MemoryStartup }
+            $memGB    = [math]::Round($mem / 1GB, 2)
+            $uptime   = if ($vm.Uptime -and $vm.Uptime.TotalSeconds -gt 0) { $vm.Uptime.ToString() } else { "-" }
+            $color    = switch ($vm.State.ToString()) {
+                "Running" { "success" } "Off" { "secondary" } "Saved" { "info" }
+                "Paused"  { "warning" } default { "danger" }
+            }
+            $ips       = @($adapters.IPAddresses | Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' })
+            $diskList  = ($disks.Path        | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
+            $ipList    = ($ips               | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
+            $snapList  = ($snaps.Name        | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
+            $swList    = ($adapters.SwitchName | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
 
-        Write-PodeHtmlResponse -Value @"
+            Write-PodeHtmlResponse -Value @"
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>$($vm.name) — Hyper-V Compose</title>
+  <title>$vmName — Hyper-V Compose</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
 </head>
 <body class="bg-light">
 <div class="container mt-4">
   <a href="/" class="btn btn-outline-secondary btn-sm mb-3">&larr; Back</a>
-  <h2>$($vm.name) <span class="badge bg-$color">$($vm.state)</span></h2>
+  <h2>$vmName <span class="badge bg-$color">$($vm.State)</span></h2>
   <div class="row mt-3">
     <div class="col-md-4">
       <ul class="list-group mb-3">
-        <li class="list-group-item"><strong>CPUs:</strong> $($vm.cpuCount)</li>
-        <li class="list-group-item"><strong>Memory:</strong> $($vm.memoryGB) GB</li>
-        <li class="list-group-item"><strong>Generation:</strong> $($vm.generation)</li>
-        <li class="list-group-item"><strong>Uptime:</strong> $($vm.uptime)</li>
+        <li class="list-group-item"><strong>CPUs:</strong> $($vm.ProcessorCount)</li>
+        <li class="list-group-item"><strong>Memory:</strong> $memGB GB</li>
+        <li class="list-group-item"><strong>Generation:</strong> $($vm.Generation)</li>
+        <li class="list-group-item"><strong>Uptime:</strong> $uptime</li>
       </ul>
       <div class="d-flex gap-2">
-        <form method="post" action="/vm/$($vm.name)/start">  <button class="btn btn-success">Start</button></form>
-        <form method="post" action="/vm/$($vm.name)/stop">   <button class="btn btn-warning">Stop</button></form>
-        <form method="post" action="/vm/$($vm.name)/restart"><button class="btn btn-info">Restart</button></form>
+        <form method="post" action="/vm/$vmName/start">  <button class="btn btn-success">Start</button></form>
+        <form method="post" action="/vm/$vmName/stop">   <button class="btn btn-warning">Stop</button></form>
+        <form method="post" action="/vm/$vmName/restart"><button class="btn btn-info">Restart</button></form>
       </div>
     </div>
     <div class="col-md-8">
       <h5>IP Addresses</h5><ul class="list-group mb-3">$(if ($ipList) { $ipList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
-      <h5>Switches</h5><ul class="list-group mb-3">$switchList</ul>
-      <h5>Disks</h5><ul class="list-group mb-3">$diskList</ul>
+      <h5>Switches</h5><ul class="list-group mb-3">$(if ($swList) { $swList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
+      <h5>Disks</h5><ul class="list-group mb-3">$(if ($diskList) { $diskList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
       <h5>Checkpoints</h5><ul class="list-group mb-3">$(if ($snapList) { $snapList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
-      $(if ($vm.notes) { "<h5>Notes</h5><pre class='bg-white p-2 border rounded'>$($vm.notes)</pre>" })
+      $(if ($vm.Notes) { "<h5>Notes</h5><pre class='bg-white p-2 border rounded'>$($vm.Notes)</pre>" })
     </div>
   </div>
 </div>
 </body>
 </html>
 "@
+        } catch {
+            Write-PodeHtmlResponse -StatusCode 500 -Value "<pre>$($_.Exception.Message)`n$($_.ScriptStackTrace)</pre>"
+        }
     }
 
     # -------------------------------------------------------
@@ -244,19 +232,55 @@ Start-PodeServer -Threads 2 {
     # GET /api/vms — JSON list
     # -------------------------------------------------------
     Add-PodeRoute -Method Get -Path "/api/vms" -ScriptBlock {
-        Write-PodeJsonResponse -Value (& $using:fnGetVMList $using:ConfigFile)
+        try {
+            $cfgFile = Get-PodeState -Name 'ConfigFile'
+            $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
+            $rows = foreach ($vmName in $stack.vms.Keys) {
+                $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+                if (-not $vm) { @{ name=$vmName; state="Not Created"; cpu="-"; memoryGB="-"; ip="-"; uptime="-" }; continue }
+                $ip  = (Get-VMNetworkAdapter -VMName $vmName).IPAddresses |
+                       Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' } | Select-Object -First 1
+                $mem = if ($vm.MemoryAssigned -gt 0) { $vm.MemoryAssigned } else { $vm.MemoryStartup }
+                @{
+                    name     = $vmName
+                    state    = $vm.State.ToString()
+                    cpu      = "$($vm.CPUUsage)%"
+                    memoryGB = [math]::Round($mem / 1GB, 2)
+                    ip       = if ($ip) { $ip } else { "-" }
+                    uptime   = if ($vm.Uptime -and $vm.Uptime.TotalSeconds -gt 0) { $vm.Uptime.ToString("dd\d\ hh\:mm\:ss") } else { "-" }
+                }
+            }
+            Write-PodeJsonResponse -Value @($rows)
+        } catch {
+            Write-PodeJsonResponse -StatusCode 500 -Value @{ error = $_.Exception.Message }
+        }
     }
 
     # -------------------------------------------------------
     # GET /api/vms/:name — JSON detail
     # -------------------------------------------------------
     Add-PodeRoute -Method Get -Path "/api/vms/:name" -ScriptBlock {
-        $vmName = $WebEvent.Parameters['name']
-        $vm = & $using:fnGetVMDetail $vmName
-        if ($vm) {
-            Write-PodeJsonResponse -Value $vm
-        } else {
-            Write-PodeJsonResponse -StatusCode 404 -Value @{ error = "VM '$vmName' not found" }
+        try {
+            $vmName = $WebEvent.Parameters['name']
+            $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+            if (-not $vm) { Write-PodeJsonResponse -StatusCode 404 -Value @{ error = "VM '$vmName' not found" }; return }
+            $adapters = Get-VMNetworkAdapter -VMName $vmName
+            $mem = if ($vm.MemoryAssigned -gt 0) { $vm.MemoryAssigned } else { $vm.MemoryStartup }
+            Write-PodeJsonResponse -Value @{
+                name        = $vm.Name
+                state       = $vm.State.ToString()
+                cpuCount    = $vm.ProcessorCount
+                memoryGB    = [math]::Round($mem / 1GB, 2)
+                uptime      = if ($vm.Uptime -and $vm.Uptime.TotalSeconds -gt 0) { $vm.Uptime.ToString() } else { "-" }
+                switches    = @($adapters.SwitchName)
+                ipAddresses = @($adapters.IPAddresses | Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' })
+                disks       = @((Get-VMHardDiskDrive -VMName $vmName).Path)
+                generation  = $vm.Generation
+                checkpoints = @((Get-VMSnapshot -VMName $vmName -ErrorAction SilentlyContinue).Name)
+                notes       = $vm.Notes
+            }
+        } catch {
+            Write-PodeJsonResponse -StatusCode 500 -Value @{ error = $_.Exception.Message }
         }
     }
 }
