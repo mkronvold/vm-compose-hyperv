@@ -248,6 +248,25 @@ function Build-VM {
         return
     }
 
+    # -------------------------
+    # Validate ISO exists
+    # -------------------------
+    if (-not $cfg.iso) {
+        Write-Host "ERROR: VM '$vmName' has no 'iso:' field in vmstack.yaml." -ForegroundColor Red
+        return
+    }
+    if (-not (Test-Path $cfg.iso)) {
+        Write-Host ""
+        Write-Host "ERROR: ISO not found for VM '$vmName':" -ForegroundColor Red
+        Write-Host "  $($cfg.iso)" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Download Windows Server evaluation ISOs from:" -ForegroundColor Cyan
+        Write-Host "  https://www.microsoft.com/en-us/evalcenter/evaluate-windows-server-2022" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Place the ISO at the path above and re-run." -ForegroundColor Gray
+        return
+    }
+
     $VmPath = Join-Path $VmRoot $vmName
     $SetupDir = Join-Path $VmPath "Setup"
     $VhdPath = Join-Path $VmPath "$vmName.vhdx"
