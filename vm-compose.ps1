@@ -22,28 +22,133 @@
     ./vm-compose.ps1 unmount <vm> <storageName>
     ./vm-compose.ps1 metrics
     ./vm-compose.ps1 web
+    ./vm-compose.ps1 help [<command>]
+    ./vm-compose.ps1 <command> help
 
 .NOTES
     Requires PowerShell 7+ for ConvertFrom-Yaml.
 #>
 
-$Version = "1.1.0"
-
 param(
-    [Parameter(Mandatory=$true)]
-    [ValidateSet("up","down","restart","destroy","status","inspect","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","metrics","web")]
+    [Parameter(Mandatory=$false, Position=0)]
+    [ValidateSet("up","down","restart","destroy","status","inspect","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","metrics","web","help")]
     [string]$Command,
 
+    [Parameter(Position=1)]
     [string]$VmName,
+    [Parameter(Position=2)]
     [string]$ExecCommand,
+    [Parameter(Position=3)]
     [string]$StorageName,
     [switch]$DryRun,
+    [switch]$Help,
+    [Alias("h")][switch]$HelpShort,
     [string]$ConfigFile = "vmstack.yaml",
     [string]$VmRoot = "D:\HyperV\VMs"
 )
 
+$Version = "1.1.0"
+
+$HelpText = @"
+vm-compose $Version — Hyper-V Compose
+
+USAGE
+  ./vm-compose.ps1 <command> [options]
+
+COMMANDS
+  up              Build and start all VMs
+  down            Stop all VMs
+  restart         Restart all VMs
+  destroy         Delete VM definitions (persistent disks preserved)
+  status          Show cluster status table
+  inspect <vm>    Show detailed info for a VM
+  logs <vm>       Show application event log from a VM
+  exec <vm> <cmd> Run a command inside a VM
+  ps <vm>         List processes inside a VM
+  ssh <vm>        Open an interactive shell inside a VM
+  ip <vm>         Print the VM's IP address
+  top <vm>        Live CPU/memory usage
+  health          Cluster-wide health check
+  validate        Lint vmstack.yaml for errors
+  version         Show version info
+  mount <vm> <storage>    Hot-add a shared storage disk to a VM
+  unmount <vm> <storage>  Remove a shared storage disk from a VM
+  metrics         Show Prometheus metrics service status
+  web             Show web dashboard service status
+
+OPTIONS
+  -DryRun         Preview changes without executing them
+  -ConfigFile     Path to YAML config (default: vmstack.yaml)
+  -VmRoot         Root path for VM storage (default: D:\HyperV\VMs)
+  -Help, -h       Show this help message
+"@
+
+$CommandHelp = @{
+    "up"       = "up [-DryRun]`n  Build and start all VMs defined in vmstack.yaml.`n  Creates OS disk, persistent disk, floppy, unattend.xml, bootstrap.ps1,`n  attaches networks and shared storage, then starts the VM."
+    "down"     = "down [-DryRun]`n  Stop all VMs (forced power-off)."
+    "restart"  = "restart [-DryRun]`n  Restart all VMs."
+    "destroy"  = "destroy [-DryRun]`n  Delete VM definitions. Persistent storage VHDXes are preserved."
+    "status"   = "status`n  Print a table of all VMs: state, CPU, memory, IP, uptime."
+    "inspect"  = "inspect <vm>`n  Show full details for a single VM: CPU, memory, disks, IPs, switches, checkpoints."
+    "logs"     = "logs <vm>`n  Show the 20 most recent Application event log entries from a VM."
+    "exec"     = "exec <vm> `"<command>`"`n  Run a command inside a VM via PowerShell Direct."
+    "ps"       = "ps <vm>`n  List the top 25 processes by CPU inside a VM."
+    "ssh"      = "ssh <vm>`n  Open an interactive PowerShell Direct session inside a VM."
+    "ip"       = "ip <vm>`n  Print the VM's first IPv4 address."
+    "top"      = "top <vm>`n  Live CPU/memory loop (Ctrl+C to exit)."
+    "health"   = "health`n  Cluster-wide health check: VM state, IP assignment, Docker responsiveness."
+    "validate" = "validate`n  Lint vmstack.yaml for missing required fields and broken references."
+    "version"  = "version`n  Print version, PowerShell version, and active config file path."
+    "mount"    = "mount <vm> <storageName>`n  Hot-add a shared storage VHDX (from the storage: section) to a running VM."
+    "unmount"  = "unmount <vm> <storageName>`n  Remove a shared storage VHDX from a VM."
+    "metrics"  = "metrics`n  Show status of the vm-metrics Prometheus exporter service.`n  Install with: ./vm-metrics-install.ps1"
+    "web"      = "web`n  Show status of the vm-dashboard web UI service.`n  Install with: ./vm-dashboard-install.ps1  |  Run directly: ./vm-dashboard.ps1"
+    "help"     = "help [<command>]`n  Show help. Run 'help <command>' for details on a specific command."
+}
+
+if ($Help -or $HelpShort -or -not $Command -or $Command -eq "help") {
+    # Per-command help: ./vm-compose.ps1 help <command>  OR  ./vm-compose.ps1 <command> help
+    $targetCmd = if ($Command -eq "help" -and $VmName -and $CommandHelp.ContainsKey($VmName)) {
+        $VmName
+    } elseif ($Command -ne "help" -and $Command -and ($VmName -eq "help" -or $ExecCommand -eq "help")) {
+        $Command
+    } else { $null }
+
+    if ($targetCmd) {
+        Write-Host ""
+        Write-Host "  $($CommandHelp[$targetCmd])" -ForegroundColor Cyan
+        Write-Host ""
+    } else {
+        Write-Host $HelpText
+    }
+    exit 0
+}
+
+# Per-command help when passed as a sub-argument: ./vm-compose.ps1 <command> help
+if ($VmName -eq "help" -or $ExecCommand -eq "help" -or $StorageName -eq "help") {
+    Write-Host ""
+    Write-Host "  $($CommandHelp[$Command])" -ForegroundColor Cyan
+    Write-Host ""
+    exit 0
+}
+
 if (-not (Test-Path $ConfigFile)) {
     Write-Host "Config file not found: $ConfigFile" -ForegroundColor Red
+
+    $example = Join-Path $PSScriptRoot "vmstack-example.yaml"
+    if (Test-Path $example) {
+        try {
+            $answer = Read-Host "Create '$ConfigFile' from vmstack-example.yaml? [y/N]"
+            if ($answer -match '^[Yy]') {
+                Copy-Item $example $ConfigFile
+                Write-Host "Created $ConfigFile from example. Edit it to match your environment, then re-run." -ForegroundColor Green
+            }
+        } catch {
+            Write-Host "Tip: Copy vmstack-example.yaml to vmstack.yaml and edit it to match your environment." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "Tip: Create a vmstack.yaml based on the vmstack-example.yaml in this repo." -ForegroundColor Yellow
+    }
     exit 1
 }
 
@@ -725,6 +830,15 @@ function Get-MetricsStatus {
     }
 }
 
+# For any command, passing "help" as the vm/sub-arg shows per-command help.
+# e.g. ./vm-compose.ps1 inspect help  OR  ./vm-compose.ps1 exec help
+if ($VmName -eq "help" -or $ExecCommand -eq "help" -or $StorageName -eq "help") {
+    Write-Host ""
+    Write-Host "  $($CommandHelp[$Command])" -ForegroundColor Cyan
+    Write-Host ""
+    exit 0
+}
+
 switch ($Command) {
     "up" {
         foreach ($vm in $vms) {
@@ -847,6 +961,17 @@ switch ($Command) {
             Write-Host "Dashboard service is not installed." -ForegroundColor Yellow
             Write-Host "Run: .\vm-dashboard-install.ps1 to install it."
             Write-Host "Or run directly: .\vm-dashboard.ps1"
+        }
+    }
+
+    "help" {
+        $targetCmd = if ($VmName -and $CommandHelp.ContainsKey($VmName)) { $VmName } else { $null }
+        if ($targetCmd) {
+            Write-Host ""
+            Write-Host "  $($CommandHelp[$targetCmd])" -ForegroundColor Cyan
+            Write-Host ""
+        } else {
+            Write-Host $HelpText
         }
     }
 }
