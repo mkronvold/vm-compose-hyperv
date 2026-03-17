@@ -70,12 +70,15 @@ Start-PodeServer -Threads 2 {
                     $rows += "<tr><td><a href='/vm/$vmName'>$vmName</a></td><td><span class='badge bg-secondary'>Not Created</span></td><td>-</td><td>-</td><td>-</td><td>-</td><td></td></tr>"
                     continue
                 }
-                $ip  = (Get-VMNetworkAdapter -VMName $vmName).IPAddresses |
-                       Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' } | Select-Object -First 1
-                $mem = if ($vm.MemoryAssigned -gt 0) { $vm.MemoryAssigned } else { $vm.MemoryStartup }
-                $memGB  = [math]::Round($mem / 1GB, 2)
-                $uptime = if ($vm.Uptime -and $vm.Uptime.TotalSeconds -gt 0) { $vm.Uptime.ToString("dd\d\ hh\:mm\:ss") } else { "-" }
-                $color  = switch ($vm.State.ToString()) {
+                $ip       = (Get-VMNetworkAdapter -VMName $vmName).IPAddresses |
+                            Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' } | Select-Object -First 1
+                $memLimit = [math]::Round($vm.MemoryStartup / 1GB, 1)
+                $memUsed  = [math]::Round(($vm.MemoryAssigned) / 1GB, 1)
+                $memPct   = if ($vm.MemoryStartup -gt 0) { [math]::Round($memUsed / $memLimit * 100) } else { 0 }
+                $cpuLabel = "$($vm.CPUUsage)% of $($vm.ProcessorCount) vCPUs"
+                $memLabel = "${memPct}% of ${memLimit} GB"
+                $uptime   = if ($vm.Uptime -and $vm.Uptime.TotalSeconds -gt 0) { $vm.Uptime.ToString("dd\d\ hh\:mm\:ss") } else { "-" }
+                $color    = switch ($vm.State.ToString()) {
                     "Running" { "success" } "Off" { "secondary" } "Saved" { "info" }
                     "Paused"  { "warning" } default { "danger" }
                 }
@@ -83,8 +86,8 @@ Start-PodeServer -Threads 2 {
                 <tr>
                   <td><a href="/vm/$vmName">$vmName</a></td>
                   <td><span class="badge bg-$color">$($vm.State)</span></td>
-                  <td>$($vm.CPUUsage)%</td>
-                  <td>$memGB GB</td>
+                  <td>$cpuLabel</td>
+                  <td>$memLabel</td>
                   <td>$(if ($ip) { $ip } else { '-' })</td>
                   <td>$uptime</td>
                   <td>
@@ -150,8 +153,11 @@ $($_.ScriptStackTrace)</pre>
             $adapters = Get-VMNetworkAdapter -VMName $vmName
             $disks    = Get-VMHardDiskDrive -VMName $vmName
             $snaps    = Get-VMSnapshot -VMName $vmName -ErrorAction SilentlyContinue
-            $mem      = if ($vm.MemoryAssigned -gt 0) { $vm.MemoryAssigned } else { $vm.MemoryStartup }
-            $memGB    = [math]::Round($mem / 1GB, 2)
+            $memLimit = [math]::Round($vm.MemoryStartup / 1GB, 1)
+            $memUsed  = [math]::Round($vm.MemoryAssigned / 1GB, 1)
+            $memPct   = if ($vm.MemoryStartup -gt 0) { [math]::Round($memUsed / $memLimit * 100) } else { 0 }
+            $cpuLabel = "$($vm.CPUUsage)% of $($vm.ProcessorCount) vCPUs"
+            $memLabel = "${memPct}% of ${memLimit} GB  ($memUsed GB assigned)"
             $uptime   = if ($vm.Uptime -and $vm.Uptime.TotalSeconds -gt 0) { $vm.Uptime.ToString() } else { "-" }
             $color    = switch ($vm.State.ToString()) {
                 "Running" { "success" } "Off" { "secondary" } "Saved" { "info" }
@@ -178,8 +184,8 @@ $($_.ScriptStackTrace)</pre>
   <div class="row mt-3">
     <div class="col-md-4">
       <ul class="list-group mb-3">
-        <li class="list-group-item"><strong>CPUs:</strong> $($vm.ProcessorCount)</li>
-        <li class="list-group-item"><strong>Memory:</strong> $memGB GB</li>
+        <li class="list-group-item"><strong>CPU:</strong> $cpuLabel</li>
+        <li class="list-group-item"><strong>Memory:</strong> $memLabel</li>
         <li class="list-group-item"><strong>Generation:</strong> $($vm.Generation)</li>
         <li class="list-group-item"><strong>Uptime:</strong> $uptime</li>
       </ul>
