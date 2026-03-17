@@ -175,6 +175,32 @@ function Invoke-IfLive {
     }
 }
 
+# Write a COM IStream (returned by IMAPI2FS) to a file.
+# ADODB.Stream.CopyFrom doesn't accept IStream; this C# shim reads it correctly.
+if (-not ([System.Management.Automation.PSTypeName]'IsoHelper').Type) {
+    Add-Type -TypeDefinition @'
+using System; using System.IO; using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+public static class IsoHelper {
+    public static void WriteIStream(object comStream, string path) {
+        var s = (IStream)comStream;
+        using (var fs = File.Create(path)) {
+            var buf = new byte[65536];
+            var ptr = Marshal.AllocHGlobal(IntPtr.Size);
+            try {
+                while (true) {
+                    s.Read(buf, buf.Length, ptr);
+                    int n = Marshal.ReadInt32(ptr);
+                    if (n == 0) break;
+                    fs.Write(buf, 0, n);
+                }
+            } finally { Marshal.FreeHGlobal(ptr); }
+        }
+    }
+}
+'@
+}
+
 # Check for Administrator privileges (required for Hyper-V operations)
 function Assert-Admin {
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -543,14 +569,7 @@ $dismConversionBlock
         $fsi.VolumeName = "Unattend"
         $fsi.Root.AddTree($SetupDir, $false)
         $resultImg = $fsi.CreateResultImage()
-        $stream = $resultImg.ImageStream
-        $adoStream = New-Object -ComObject ADODB.Stream
-        $adoStream.Type = 1  # Binary
-        $adoStream.Open()
-        $adoStream.CopyFrom($stream)
-        $adoStream.Position = 0
-        $adoStream.SaveToFile($AnswerIsoPath, 2)
-        $adoStream.Close()
+        [IsoHelper]::WriteIStream($resultImg.ImageStream, $AnswerIsoPath)
         Write-Host "Created answer.iso ($([math]::Round((Get-Item $AnswerIsoPath).Length/1KB)) KB)"
     }
 
@@ -621,7 +640,9 @@ $dismConversionBlock
     }
 
     Invoke-IfLive "Set-VMFirmware $vmName -EnableSecureBoot Off, boot from DVD first" {
-        $dvd = Get-VMDvdDrive -VMName $vmName
+        # Select the Windows installation DVD specifically (not the answer ISO)
+        $dvd = Get-VMDvdDrive -VMName $vmName | Where-Object { $_.Path -eq $cfg.iso } | Select-Object -First 1
+        if (-not $dvd) { $dvd = Get-VMDvdDrive -VMName $vmName | Select-Object -First 1 }
         if ($dvd) {
             Set-VMFirmware -VMName $vmName -EnableSecureBoot Off -FirstBootDevice $dvd
         } else {
