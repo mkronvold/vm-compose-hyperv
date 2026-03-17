@@ -12,7 +12,7 @@
 
 .NOTES
     Requires the Pode module. Install with:
-        Install-Module Pode -Scope CurrentUser
+        Install-Module Pode -Scope AllUsers
     Requires PowerShell 7+ and the Hyper-V module.
 #>
 
@@ -26,23 +26,33 @@ if (-not [System.IO.Path]::IsPathRooted($ConfigFile)) {
     $ConfigFile = Join-Path $scriptDir $ConfigFile
 }
 
-# Ensure Pode is installed
+# Ensure Pode is installed (install script should have done this AllUsers; this is a fallback for direct runs)
 if (-not (Get-Module -ListAvailable -Name Pode)) {
     Write-Host "Installing Pode module..." -ForegroundColor Yellow
-    Install-Module Pode -Scope CurrentUser -Force -AllowClobber
+    $scope = if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole('Administrator')) { 'AllUsers' } else { 'CurrentUser' }
+    Install-Module Pode -Scope $scope -Force -AllowClobber
+}
+
+if (-not (Get-Module -ListAvailable -Name powershell-yaml)) {
+    Write-Host "Installing powershell-yaml module..." -ForegroundColor Yellow
+    $scope = if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole('Administrator')) { 'AllUsers' } else { 'CurrentUser' }
+    Install-Module powershell-yaml -Scope $scope -Force -AllowClobber
 }
 
 Import-Module Pode
+Import-Module powershell-yaml
 
 if (-not (Test-Path $ConfigFile)) {
     Write-Error "Config file not found: $ConfigFile"
     exit 1
 }
 
-function Get-VMList {
-    $stack = Get-Content $ConfigFile | ConvertFrom-Yaml
-    $vmNames = $stack.vms.Keys
-    $rows = foreach ($vmName in $vmNames) {
+# Helper scriptblocks — passed via $using: into Pode route runspaces
+$fnGetVMList = {
+    param($cfgFile)
+    Import-Module powershell-yaml -ErrorAction SilentlyContinue
+    $stack = Get-Content $cfgFile | ConvertFrom-Yaml
+    $rows = foreach ($vmName in $stack.vms.Keys) {
         $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
         if (-not $vm) {
             [ordered]@{ name=$vmName; state="Not Created"; cpu="-"; memoryGB="-"; ip="-"; uptime="-" }
@@ -50,30 +60,32 @@ function Get-VMList {
         }
         $ip = (Get-VMNetworkAdapter -VMName $vmName).IPAddresses |
               Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' } | Select-Object -First 1
+        $mem = if ($vm.MemoryAssigned -gt 0) { $vm.MemoryAssigned } else { $vm.MemoryStartup }
         [ordered]@{
             name     = $vmName
             state    = $vm.State.ToString()
             cpu      = "$($vm.CPUUsage)%"
-            memoryGB = [math]::Round($vm.MemoryAssigned / 1GB, 2)
+            memoryGB = [math]::Round($mem / 1GB, 2)
             ip       = if ($ip) { $ip } else { "-" }
-            uptime   = if ($vm.Uptime) { $vm.Uptime.ToString("dd\d\ hh\:mm\:ss") } else { "-" }
+            uptime   = if ($vm.Uptime -and $vm.Uptime.TotalSeconds -gt 0) { $vm.Uptime.ToString("dd\d\ hh\:mm\:ss") } else { "-" }
         }
     }
     return @($rows)
 }
 
-function Get-VMDetail {
-    param([string]$vmName)
+$fnGetVMDetail = {
+    param($vmName)
     $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
     if (-not $vm) { return $null }
     $adapters = Get-VMNetworkAdapter -VMName $vmName
     $disks    = Get-VMHardDiskDrive -VMName $vmName
+    $mem = if ($vm.MemoryAssigned -gt 0) { $vm.MemoryAssigned } else { $vm.MemoryStartup }
     return [ordered]@{
         name        = $vm.Name
         state       = $vm.State.ToString()
         cpuCount    = $vm.ProcessorCount
-        memoryGB    = [math]::Round($vm.MemoryAssigned / 1GB, 2)
-        uptime      = if ($vm.Uptime) { $vm.Uptime.ToString() } else { "-" }
+        memoryGB    = [math]::Round($mem / 1GB, 2)
+        uptime      = if ($vm.Uptime -and $vm.Uptime.TotalSeconds -gt 0) { $vm.Uptime.ToString() } else { "-" }
         switches    = @($adapters.SwitchName)
         ipAddresses = @($adapters.IPAddresses | Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' })
         disks       = @($disks.Path)
@@ -83,8 +95,7 @@ function Get-VMDetail {
     }
 }
 
-# HTML helpers
-$stateColor = {
+$fnStateColor = {
     param($state)
     switch ($state) {
         "Running"    { "success" }
@@ -97,16 +108,17 @@ $stateColor = {
 
 Start-PodeServer -Threads 2 {
 
-    Add-PodeEndpoint -Address * -Port $Port -Protocol Http
+    Add-PodeEndpoint -Address localhost -Port $Port -Protocol Http
 
     # -------------------------------------------------------
     # GET / — dashboard
     # -------------------------------------------------------
     Add-PodeRoute -Method Get -Path "/" -ScriptBlock {
-        $vms = Get-VMList
+        $vms = & $using:fnGetVMList $using:ConfigFile
+        $stateColor = $using:fnStateColor
         $rows = ""
         foreach ($vm in $vms) {
-            $color = & $using:stateColor $vm.state
+            $color = & $stateColor $vm.state
             $rows += @"
             <tr>
               <td><a href="/vm/$($vm.name)">$($vm.name)</a></td>
@@ -155,17 +167,17 @@ Start-PodeServer -Threads 2 {
     # -------------------------------------------------------
     Add-PodeRoute -Method Get -Path "/vm/:name" -ScriptBlock {
         $vmName = $WebEvent.Parameters['name']
-        $vm = Get-VMDetail $vmName
+        $vm = & $using:fnGetVMDetail $vmName
         if (-not $vm) {
             Write-PodeHtmlResponse -StatusCode 404 -Value "<h3>VM '$vmName' not found</h3>"
             return
         }
 
-        $color = & $using:stateColor $vm.state
-        $diskList  = ($vm.disks       | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
-        $ipList    = ($vm.ipAddresses | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
-        $snapList  = ($vm.checkpoints | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
-        $switchList= ($vm.switches    | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
+        $color      = & $using:fnStateColor $vm.state
+        $diskList   = ($vm.disks       | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
+        $ipList     = ($vm.ipAddresses | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
+        $snapList   = ($vm.checkpoints | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
+        $switchList = ($vm.switches    | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
 
         Write-PodeHtmlResponse -Value @"
 <!doctype html>
@@ -194,10 +206,11 @@ Start-PodeServer -Threads 2 {
       </div>
     </div>
     <div class="col-md-8">
-      <h5>IP Addresses</h5><ul class="list-group mb-3">$ipList</ul>
+      <h5>IP Addresses</h5><ul class="list-group mb-3">$(if ($ipList) { $ipList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
       <h5>Switches</h5><ul class="list-group mb-3">$switchList</ul>
       <h5>Disks</h5><ul class="list-group mb-3">$diskList</ul>
       <h5>Checkpoints</h5><ul class="list-group mb-3">$(if ($snapList) { $snapList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
+      $(if ($vm.notes) { "<h5>Notes</h5><pre class='bg-white p-2 border rounded'>$($vm.notes)</pre>" })
     </div>
   </div>
 </div>
@@ -231,7 +244,7 @@ Start-PodeServer -Threads 2 {
     # GET /api/vms — JSON list
     # -------------------------------------------------------
     Add-PodeRoute -Method Get -Path "/api/vms" -ScriptBlock {
-        Write-PodeJsonResponse -Value (Get-VMList)
+        Write-PodeJsonResponse -Value (& $using:fnGetVMList $using:ConfigFile)
     }
 
     # -------------------------------------------------------
@@ -239,7 +252,7 @@ Start-PodeServer -Threads 2 {
     # -------------------------------------------------------
     Add-PodeRoute -Method Get -Path "/api/vms/:name" -ScriptBlock {
         $vmName = $WebEvent.Parameters['name']
-        $vm = Get-VMDetail $vmName
+        $vm = & $using:fnGetVMDetail $vmName
         if ($vm) {
             Write-PodeJsonResponse -Value $vm
         } else {

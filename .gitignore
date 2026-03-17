@@ -43,3 +43,10 @@ desktop.ini
 # Personal notes
 names.md
 *.pw
+winkey.md
+
+# Actual stack config (commit vmstack-example.yaml instead)
+vmstack.yaml
+
+# Generated service wrapper scripts
+*-svc-wrapper.ps1

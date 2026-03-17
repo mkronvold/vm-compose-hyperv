@@ -12,23 +12,32 @@
 $ServiceName = "vm-metrics"
 
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if (-not $svc) {
-    Write-Host "Service '$ServiceName' is not installed." -ForegroundColor Yellow
+$task = Get-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue
+
+if (-not $svc -and -not $task) {
+    Write-Host "vm-metrics is not installed (no service or task found)." -ForegroundColor Yellow
     exit 0
 }
 
-Write-Host "Stopping service '$ServiceName'..."
-Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-
 $nssm = Get-Command nssm -ErrorAction SilentlyContinue
-if ($nssm) {
-    & nssm remove $ServiceName confirm
-} else {
-    & sc.exe delete $ServiceName | Out-Null
+
+if ($svc) {
+    Write-Host "Stopping and removing service '$ServiceName'..."
+    Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+    if ($nssm) {
+        & nssm remove $ServiceName confirm
+    } else {
+        & sc.exe delete $ServiceName | Out-Null
+    }
 }
 
-# Remove wrapper script if it exists
+if ($task) {
+    Write-Host "Stopping and removing scheduled task '$ServiceName'..."
+    Stop-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $ServiceName -Confirm:$false
+}
+
 $wrapperPath = Join-Path $PSScriptRoot "vm-metrics-svc-wrapper.ps1"
 if (Test-Path $wrapperPath) { Remove-Item $wrapperPath -Force }
 
-Write-Host "Service '$ServiceName' removed." -ForegroundColor Green
+Write-Host "vm-metrics uninstalled." -ForegroundColor Green
