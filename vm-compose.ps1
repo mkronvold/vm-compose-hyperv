@@ -279,6 +279,32 @@ function Build-VM {
     }
 
     # -------------------------
+    # Resolve admin password
+    # -------------------------
+    $adminPassword = if ($cfg.admin_password) {
+        Write-Host "Using admin_password from vmstack.yaml." -ForegroundColor Gray
+        $cfg.admin_password
+    } else {
+        $chars = ([char[]]([char]'A'..[char]'Z') + [char[]]([char]'a'..[char]'z') + [char[]]([char]'0'..[char]'9'))
+        $generated = -join (1..20 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Count)] })
+        Write-Host ""
+        Write-Host "  Generated Administrator password for '$vmName':" -ForegroundColor Cyan
+        Write-Host "  $generated" -ForegroundColor Yellow
+        Write-Host "  Save this -- it will not be shown again." -ForegroundColor Gray
+        Write-Host ""
+        $generated
+    }
+
+    # Encode for unattend.xml: Base64(Unicode(password + "AdministratorPassword"))
+    $encodedPassword = [Convert]::ToBase64String(
+        [System.Text.Encoding]::Unicode.GetBytes($adminPassword + "AdministratorPassword")
+    )
+
+    # Optional product key XML
+    $productKeyXml   = if ($cfg.key)      { "        <ProductKey>$($cfg.key)</ProductKey>" } else { "" }
+    $keyNotesComment = if ($cfg.keynotes) { "    <!-- Key: $($cfg.keytype) | $($cfg.keynotes) -->" } else { "" }
+
+    # -------------------------
     # Generate unattend.xml
     # -------------------------
     $unattend = @"
@@ -336,9 +362,11 @@ function Build-VM {
         <AcceptEula>true</AcceptEula>
         <FullName>Administrator</FullName>
         <Organization>Local</Organization>
+$productKeyXml
       </UserData>
     </component>
   </settings>
+$keyNotesComment
 
   <settings pass="specialize">
     <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
@@ -355,8 +383,8 @@ function Build-VM {
       </OOBE>
       <UserAccounts>
         <AdministratorPassword>
-          <Value>P@ssw0rd!</Value>
-          <PlainText>true</PlainText>
+          <Value>$encodedPassword</Value>
+          <PlainText>false</PlainText>
         </AdministratorPassword>
       </UserAccounts>
 

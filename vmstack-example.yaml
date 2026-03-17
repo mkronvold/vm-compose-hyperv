@@ -14,7 +14,11 @@ storage:
 
 vms:
   winhost1:
-    iso: "D:/ISO/WindowsServer2022.iso"
+    iso: "DC:/ISO/WindowsServer2022.iso"
+    # key: "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"   # optional product key; omit for eval ISO (180-day trial)
+    # keytype: "Windows Server 2022 Standard"  # informational
+    # keynotes: "use dism to convert from eval to retail"  # informational
+    # admin_password: "YourPassword123"        # optional; if omitted a random 20-char password is generated and printed once
     memory_gb: 8
     cpus: 4
     os_disk_gb: 80
@@ -25,7 +29,7 @@ vms:
       - shareddata
 
   winhost2:
-    iso: "D:/ISO/WindowsServer2025.iso"
+    iso: "C:/ISO/WindowsServer2025.iso"
     memory_gb: 4
     cpus: 2
     os_disk_gb: 60
