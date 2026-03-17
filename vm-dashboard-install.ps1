@@ -79,7 +79,7 @@ foreach ($mod in @('Pode', 'powershell-yaml')) {
         if ($src) {
             $dstRoot = Join-Path "C:\Program Files\PowerShell\Modules" $mod
             Copy-Item -Path (Split-Path $src.ModuleBase) -Destination $dstRoot -Recurse -Force
-            Write-Host "  $mod copied to AllUsers from $($src.ModuleBase)" -ForegroundColor Green
+            Write-Host "  $mod copied to AllUsers (files were in use by this session)" -ForegroundColor Green
             $installed = $true
         }
     }
