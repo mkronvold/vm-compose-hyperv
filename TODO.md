@@ -1,13 +1,10 @@
-TODO/Planning rules:
-- clarify the plan for each TODO item
-- list any dependencies or blockers for each item
-- break down into smaller steps if needed
-- update documentation and examples as features are added
+All items below have been implemented. See commit history for details.
 
-Perform each as an individual TODO item:
-1. add vm-compose.ps1 --dry-run mode
-2. add vm-compose.ps1 validate (command to lint your YAML)
-3. add vm-compose.ps1 version
-4. vm-compose attach/detach storage
-5. vm-compose metrics (export Prometheus‑style metrics)
-6. vm-compose web UI (dashboard)
+## Completed
+
+1. ✅ `vm-compose.ps1 --dry-run` — preview mode; wraps all mutating ops, prints `[DRY RUN] Would: <action>`
+2. ✅ `vm-compose.ps1 validate` — lints `vmstack.yml` for required fields, broken network/storage refs, NAT config
+3. ✅ `vm-compose.ps1 version` — prints version, PowerShell version, and config path
+4. ✅ `vm-compose.ps1 mount/unmount` — hot-add/remove shared storage disks on running VMs; build-time `mount:` support in `vmstack.yml`
+5. ✅ `vm-metrics.ps1` — Prometheus metrics exporter as a Windows service (`:9090/metrics`)
+6. ✅ `vm-dashboard.ps1` — Pode-based web UI dashboard as a Windows service (`http://localhost:8080`)
