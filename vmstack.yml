@@ -1,0 +1,18 @@
+version: "1"
+
+vms:
+  winhost1:
+    iso: "D:/ISO/WindowsServer2022.iso"
+    memory_gb: 8
+    cpus: 4
+    os_disk_gb: 80
+    persistent_disk_gb: 50
+    mirantis_url: "https://download.mirantis.com/runtime/mcr-23.0.0.msi"
+
+  winhost2:
+    iso: "D:/ISO/WindowsServer2025.iso"
+    memory_gb: 4
+    cpus: 2
+    os_disk_gb: 60
+    persistent_disk_gb: 30
+    mirantis_url: "https://download.mirantis.com/runtime/mcr-23.0.0.msi"
