@@ -55,6 +55,30 @@ if (Get-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue) {
 }
 Wait-PortFree -Port 9090
 
+# ── Ensure powershell-yaml is installed AllUsers (for SYSTEM account) ────────
+$mod = 'powershell-yaml'
+$allUsers = Get-Module -ListAvailable $mod |
+            Where-Object { $_.ModuleBase -notmatch [regex]::Escape($env:USERPROFILE) }
+if ($allUsers) {
+    Write-Host "$mod already installed AllUsers: $($allUsers.ModuleBase)" -ForegroundColor Green
+} else {
+    Write-Host "Installing $mod (AllUsers)..." -ForegroundColor Cyan
+    $installed = $false
+    try { Install-Module $mod -Scope AllUsers -Force -AllowClobber -ErrorAction Stop; $installed = $true } catch {}
+    if (-not $installed) {
+        $src = Get-Module -ListAvailable $mod | Select-Object -First 1
+        if ($src) {
+            $dstRoot = Join-Path "C:\Program Files\PowerShell\Modules" $mod
+            Copy-Item -Path (Split-Path $src.ModuleBase) -Destination $dstRoot -Recurse -Force
+            Write-Host "  $mod copied to AllUsers (files were in use by this session)" -ForegroundColor Green
+            $installed = $true
+        }
+    }
+    if (-not $installed) {
+        Write-Warning "$mod could not be installed AllUsers — metrics may fail as SYSTEM."
+    }
+}
+
 # ── NSSM: detect or offer to install ───────────────────────────────────────
 function Get-NssmMethod {
     if (Get-Command nssm -ErrorAction SilentlyContinue) { return 'nssm' }
