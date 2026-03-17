@@ -32,7 +32,7 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","build","down","restart","destroy","status","inspect","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","metrics","web","help")]
+    [ValidateSet("up","build","down","restart","destroy","list","status","inspect","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","metrics","web","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -62,6 +62,7 @@ COMMANDS
   down [<vm>]     Stop VMs (all, or a specific VM)
   restart [<vm>]  Restart VMs (all, or a specific VM)
   destroy [<vm>]  Delete VM definitions (all, or a specific VM)
+  list            List VM names defined in vmstack.yaml
   status [<vm>]   Show status table (all, or a specific VM)
   inspect <vm>    Show detailed info for a VM
   logs <vm>       Show application event log from a VM
@@ -903,6 +904,10 @@ switch ($Command) {
 
     "destroy" {
         Remove-AllVMs $VmName
+    }
+
+    "list" {
+        $vms | Sort-Object | ForEach-Object { Write-Host $_ }
     }
 
     "status" {
