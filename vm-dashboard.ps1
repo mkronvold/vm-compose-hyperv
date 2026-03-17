@@ -18,7 +18,7 @@
 
 param(
     [int]$Port = 8080,
-    [string]$ConfigFile = "vmstack.yml"
+    [string]$ConfigFile = "vmstack.yaml"
 )
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition

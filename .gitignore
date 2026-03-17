@@ -37,7 +37,7 @@ Thumbs.db
 desktop.ini
 
 # YAML backups
-*.yml.bak
+*.yaml.bak
 *.yaml.bak
 
 # Personal notes

@@ -38,7 +38,7 @@ param(
     [string]$ExecCommand,
     [string]$StorageName,
     [switch]$DryRun,
-    [string]$ConfigFile = "vmstack.yml",
+    [string]$ConfigFile = "vmstack.yaml",
     [string]$VmRoot = "D:\HyperV\VMs"
 )
 

@@ -17,7 +17,7 @@
 
 param(
     [int]$Port = 9090,
-    [string]$ConfigFile = "vmstack.yml",
+    [string]$ConfigFile = "vmstack.yaml",
     [int]$RefreshSeconds = 15
 )
 

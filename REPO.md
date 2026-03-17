@@ -5,7 +5,7 @@ A recommended structure for your Hyper‑V Compose project:
 ```
 hyperv-compose/
 ├── vm-compose.ps1
-├── vmstack.yml
+├── vmstack.yaml
 ├── README.md
 ├── .gitignore
 ├── networks/
@@ -13,7 +13,7 @@ hyperv-compose/
 │   ├── external-switch.ps1
 │   └── nat-network.ps1
 └── storage/
-    ├── shared-disks.yml
+    ├── shared-disks.yaml
     ├── create-shared-disk.ps1
     └── attach-shared-disk.ps1
 ```
@@ -23,7 +23,7 @@ hyperv-compose/
 - **vm-compose.ps1**  
   The orchestrator — your “docker‑compose” equivalent.
 
-- **vmstack.yml**  
+- **vmstack.yaml**  
   Declarative VM definitions.
 
 - **networks/**  
@@ -78,7 +78,7 @@ Thumbs.db
 desktop.ini
 
 # YAML backups
-*.yml.bak
+*.yaml.bak
 *.yaml.bak
 ```
 
@@ -88,7 +88,7 @@ desktop.ini
 
 You can now define Hyper‑V virtual switches in your YAML, similar to Docker Compose networks.
 
-Add this to your `vmstack.yml`:
+Add this to your `vmstack.yaml`:
 
 ```yaml
 version: "1"
@@ -132,7 +132,7 @@ Your `vm-compose.ps1` can automatically create switches if they don’t exist.
 
 You can define **shared disks** or **named volumes** that multiple VMs can attach to.
 
-Add this to your `vmstack.yml`:
+Add this to your `vmstack.yaml`:
 
 ```yaml
 storage:

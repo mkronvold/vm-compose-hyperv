@@ -1,6 +1,6 @@
 # Hyper‑V Compose
 
-Hyper‑V Compose is a **docker‑compose‑like orchestrator** for building and managing Windows Server VMs on Hyper‑V using a declarative YAML file (`vmstack.yml`).
+Hyper‑V Compose is a **docker‑compose‑like orchestrator** for building and managing Windows Server VMs on Hyper‑V using a declarative YAML file (`vmstack.yaml`).
 
 It gives you a clean, predictable workflow:
 
@@ -37,7 +37,7 @@ Each VM is fully automated:
 
 ---
 
-# Example `vmstack.yml`
+# Example `vmstack.yaml`
 
 ```yaml
 version: "1"
@@ -140,7 +140,7 @@ Add `-DryRun` to any mutating command to preview what would happen without makin
 
 # Validate
 
-Lint your `vmstack.yml` before running:
+Lint your `vmstack.yaml` before running:
 
 ```
 ./vm-compose.ps1 validate
