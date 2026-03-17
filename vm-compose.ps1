@@ -32,7 +32,7 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","build","down","restart","destroy","list","status","inspect","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","metrics","web","help")]
+    [ValidateSet("up","build","down","restart","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","metrics","web","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -65,7 +65,7 @@ COMMANDS
   destroy [<vm>]  Delete VM definitions (all, or a specific VM)
   list            List VM names defined in vmstack.yaml
   status [<vm>]   Show status table (all, or a specific VM)
-  inspect <vm>    Show detailed info for a VM
+  inspect <vm>    Show detailed info for a VM (aliases: describe, show)
   logs <vm>       Show application event log from a VM
   exec <vm> <cmd> Run a command inside a VM
   ps <vm>         List processes inside a VM
@@ -95,7 +95,9 @@ $CommandHelp = @{
     "restart"  = "restart [-DryRun]`n  Restart all VMs."
     "destroy"  = "destroy [-DryRun]`n  Delete VM definitions. Persistent storage VHDXes are preserved."
     "status"   = "status`n  Print a table of all VMs: state, CPU, memory, IP, uptime."
-    "inspect"  = "inspect <vm>`n  Show full details for a single VM: CPU, memory, disks, IPs, switches, checkpoints."
+    "inspect"  = "inspect <vm>  (aliases: describe, show)`n  Show full details for a single VM: CPU, memory, disks, IPs, switches, checkpoints."
+    "describe" = "describe <vm>`n  Alias for inspect."
+    "show"     = "show <vm>`n  Alias for inspect."
     "logs"     = "logs <vm>`n  Show the 20 most recent Application event log entries from a VM."
     "exec"     = "exec <vm> `"<command>`"`n  Run a command inside a VM via PowerShell Direct."
     "ps"       = "ps <vm>`n  List the top 25 processes by CPU inside a VM."
@@ -1041,7 +1043,7 @@ switch ($Command) {
         Get-AllVMStatus $VmName
     }
 
-    "inspect" {
+    { $_ -in "inspect","describe","show" } {
         if (-not $VmName) {
             Write-Host "Usage: ./vm-compose.ps1 inspect <vmName>" -ForegroundColor Yellow
         } else {
