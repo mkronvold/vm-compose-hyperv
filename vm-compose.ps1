@@ -565,6 +565,12 @@ docker pull mcr.microsoft.com/windows/servercore:ltsc2022
         Invoke-IfLive "Connect-VMNetworkAdapter $vmName to switch $switchName" {
             Connect-VMNetworkAdapter -VMName $vmName -SwitchName $switchName
         }
+        if ($cfg.mac_address) {
+            $mac = $cfg.mac_address -replace '[:\-]', ''  # strip separators → 12 hex chars
+            Invoke-IfLive "Set static MAC $($cfg.mac_address) on $vmName" {
+                Set-VMNetworkAdapter -VMName $vmName -StaticMacAddress $mac
+            }
+        }
     }
 
     # -------------------------

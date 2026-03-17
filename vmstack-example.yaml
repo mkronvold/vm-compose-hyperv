@@ -26,6 +26,7 @@ vms:
     os_disk_gb: 80
     persistent_disk_gb: 50
     network: natnet
+    mac_address: "00:15:5D:AB:CD:01"   # optional — omit for dynamic MAC
     mirantis_url: "https://download.mirantis.com/runtime/mcr-23.0.0.msi"
     mount:
       - shareddata
@@ -37,6 +38,7 @@ vms:
     os_disk_gb: 60
     persistent_disk_gb: 30
     network: natnet
+    # mac_address: "00:15:5D:AB:CD:02"   # uncomment to pin MAC
     mirantis_url: "https://download.mirantis.com/runtime/mcr-23.0.0.msi"
     mount:
       - shareddata
