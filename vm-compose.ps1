@@ -224,6 +224,18 @@ function Build-VM {
     Write-Host ""
     Write-Host "=== Building VM: $vmName ==="
 
+    # If the VM already exists, just ensure it's running
+    $existingVm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+    if ($existingVm) {
+        if ($existingVm.State -eq 'Running') {
+            Write-Host "VM '$vmName' is already running." -ForegroundColor Green
+        } else {
+            Write-Host "VM '$vmName' already exists (state: $($existingVm.State)). Starting..." -ForegroundColor Yellow
+            Invoke-IfLive "Start-VM $vmName" { Start-VM -Name $vmName }
+        }
+        return
+    }
+
     $VmPath = Join-Path $VmRoot $vmName
     $SetupDir = Join-Path $VmPath "Setup"
     $VhdPath = Join-Path $VmPath "$vmName.vhdx"
@@ -406,11 +418,6 @@ docker pull mcr.microsoft.com/windows/servercore:ltsc2022
     # -------------------------
     # Create VM
     # -------------------------
-    if (Get-VM -Name $vmName -ErrorAction SilentlyContinue) {
-        Write-Host "VM '$vmName' already exists. Skipping." -ForegroundColor Yellow
-        return
-    }
-
     Invoke-IfLive "New-VM $vmName ($($cfg.memory_gb) GB RAM, $($cfg.cpus) CPUs)" {
         New-VM -Name $vmName -MemoryStartupBytes ($cfg.memory_gb * 1GB) -Generation 2 -VHDPath $VhdPath -Path $VmPath | Out-Null
         Set-VM -Name $vmName -ProcessorCount $cfg.cpus
