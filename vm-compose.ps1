@@ -57,12 +57,12 @@ USAGE
   ./vm-compose.ps1 <command> [options]
 
 COMMANDS
-  up              Build and start all VMs
-  build           Provision all VMs without starting them
-  down            Stop all VMs
-  restart         Restart all VMs
-  destroy         Delete VM definitions (persistent disks preserved)
-  status          Show cluster status table
+  up [<vm>]       Build and start VMs (all, or a specific VM)
+  build [<vm>]    Provision VMs without starting (all, or a specific VM)
+  down [<vm>]     Stop VMs (all, or a specific VM)
+  restart [<vm>]  Restart VMs (all, or a specific VM)
+  destroy [<vm>]  Delete VM definitions (all, or a specific VM)
+  status [<vm>]   Show status table (all, or a specific VM)
   inspect <vm>    Show detailed info for a VM
   logs <vm>       Show application event log from a VM
   exec <vm> <cmd> Run a command inside a VM
@@ -70,7 +70,7 @@ COMMANDS
   ssh <vm>        Open an interactive shell inside a VM
   ip <vm>         Print the VM's IP address
   top <vm>        Live CPU/memory usage
-  health          Cluster-wide health check
+  health [<vm>]   Health check (all, or a specific VM)
   validate        Lint vmstack.yaml for errors
   version         Show version info
   mount <vm> <storage>    Hot-add a shared storage disk to a VM
@@ -99,7 +99,7 @@ $CommandHelp = @{
     "ssh"      = "ssh <vm>`n  Open an interactive PowerShell Direct session inside a VM."
     "ip"       = "ip <vm>`n  Print the VM's first IPv4 address."
     "top"      = "top <vm>`n  Live CPU/memory loop (Ctrl+C to exit)."
-    "health"   = "health`n  Cluster-wide health check: VM state, IP assignment, Docker responsiveness."
+    "health"   = "health [<vm>]`n  Health check: VM state, IP assignment, Docker responsiveness. Omit <vm> for all."
     "validate" = "validate`n  Lint vmstack.yaml for missing required fields and broken references."
     "version"  = "version`n  Print version, PowerShell version, and active config file path."
     "mount"    = "mount <vm> <storageName>`n  Hot-add a shared storage VHDX (from the storage: section) to a running VM."
@@ -476,45 +476,67 @@ docker pull mcr.microsoft.com/windows/servercore:ltsc2022
     }
 }
 
+function Resolve-TargetVMs {
+    param([string]$Name)
+    if ($Name) {
+        if ($Name -notin $vms) {
+            Write-Host "VM '$Name' is not defined in $ConfigFile" -ForegroundColor Red
+            exit 1
+        }
+        return @($Name)
+    }
+    return $vms
+}
+
 function Stop-AllVMs {
-    foreach ($vm in $vms) {
+    param([string]$Target)
+    foreach ($vm in (Resolve-TargetVMs $Target)) {
         if (Get-VM -Name $vm -ErrorAction SilentlyContinue) {
             Invoke-IfLive "Stop-VM $vm -Force -TurnOff" {
                 Stop-VM -Name $vm -Force -TurnOff
             }
             Write-Host "Stopped $vm"
+        } else {
+            Write-Host "VM '$vm' not found, skipping." -ForegroundColor Yellow
         }
     }
 }
 
 function Restart-AllVMs {
-    foreach ($vm in $vms) {
+    param([string]$Target)
+    foreach ($vm in (Resolve-TargetVMs $Target)) {
         if (Get-VM -Name $vm -ErrorAction SilentlyContinue) {
             Invoke-IfLive "Restart-VM $vm" {
-                Restart-VM -Name $vm
+                Restart-VM -Name $vm -Force
             }
             Write-Host "Restarted $vm"
+        } else {
+            Write-Host "VM '$vm' not found, skipping." -ForegroundColor Yellow
         }
     }
 }
 
 function Remove-AllVMs {
-    foreach ($vm in $vms) {
+    param([string]$Target)
+    foreach ($vm in (Resolve-TargetVMs $Target)) {
         if (Get-VM -Name $vm -ErrorAction SilentlyContinue) {
             Invoke-IfLive "Stop-VM $vm + Remove-VM $vm (persistent disk preserved)" {
                 Stop-VM -Name $vm -Force -TurnOff -ErrorAction SilentlyContinue
                 Remove-VM -Name $vm -Force
             }
             Write-Host "Destroyed VM $vm (persistent disk preserved)"
+        } else {
+            Write-Host "VM '$vm' not found, skipping." -ForegroundColor Yellow
         }
     }
 }
 
 function Get-AllVMStatus {
+    param([string]$Target)
     Write-Host ""
     Write-Host "=== VM Status ==="
 
-    $rows = foreach ($vm in $vms) {
+    $rows = foreach ($vm in (Resolve-TargetVMs $Target)) {
         $info = Get-VM -Name $vm -ErrorAction SilentlyContinue
         if (-not $info) {
             [PSCustomObject]@{
@@ -672,10 +694,11 @@ function Get-VMTop {
 }
 
 function Test-AllVMs {
+    param([string]$Target)
     Write-Host ""
     Write-Host "=== VM Health Check ==="
 
-    foreach ($vm in $vms) {
+    foreach ($vm in (Resolve-TargetVMs $Target)) {
         $exists = Get-VM -Name $vm -ErrorAction SilentlyContinue
         if (-not $exists) {
             Write-Host "${vm}: NOT CREATED" -ForegroundColor Red
@@ -859,31 +882,31 @@ if ($VmName -eq "help" -or $ExecCommand -eq "help" -or $StorageName -eq "help") 
 
 switch ($Command) {
     "up" {
-        foreach ($vm in $vms) {
+        foreach ($vm in (Resolve-TargetVMs $VmName)) {
             Build-VM $vm $stack.vms[$vm] -AutoStart
         }
     }
 
     "build" {
-        foreach ($vm in $vms) {
+        foreach ($vm in (Resolve-TargetVMs $VmName)) {
             Build-VM $vm $stack.vms[$vm]
         }
     }
 
     "down" {
-        Stop-AllVMs
+        Stop-AllVMs $VmName
     }
 
     "restart" {
-        Restart-AllVMs
+        Restart-AllVMs $VmName
     }
 
     "destroy" {
-        Remove-AllVMs
+        Remove-AllVMs $VmName
     }
 
     "status" {
-        Get-AllVMStatus
+        Get-AllVMStatus $VmName
     }
 
     "inspect" {
@@ -943,7 +966,7 @@ switch ($Command) {
     }
 
     "health" {
-        Test-AllVMs
+        Test-AllVMs $VmName
     }
 
     "validate" {
