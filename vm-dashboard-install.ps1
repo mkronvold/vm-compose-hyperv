@@ -56,28 +56,37 @@ if (Get-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue) {
 Wait-PortFree -Port 8080
 
 # ── Ensure required modules are installed AllUsers (for SYSTEM account) ────
-# Must run directly in this process (elevated). Subprocess loses elevation.
 foreach ($mod in @('Pode', 'powershell-yaml')) {
     $allUsers = Get-Module -ListAvailable $mod |
                 Where-Object { $_.ModuleBase -notmatch [regex]::Escape($env:USERPROFILE) }
     if ($allUsers) {
         Write-Host "$mod already installed AllUsers: $($allUsers.ModuleBase)" -ForegroundColor Green
-    } else {
-        Write-Host "Installing $mod (AllUsers)..." -ForegroundColor Cyan
-        try {
-            Install-Module $mod -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
-        } catch {
-            Write-Warning "Install-Module failed for ${mod}: $_"
+        continue
+    }
+
+    Write-Host "Installing $mod (AllUsers)..." -ForegroundColor Cyan
+
+    # Try direct install first (works if module is not loaded in this session)
+    $installed = $false
+    try {
+        Install-Module $mod -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+        $installed = $true
+    } catch {}
+
+    if (-not $installed) {
+        # Module DLLs are "in use" in this process — copy files directly instead
+        $src = Get-Module -ListAvailable $mod | Select-Object -First 1
+        if ($src) {
+            $dstRoot = Join-Path "C:\Program Files\PowerShell\Modules" $mod
+            Copy-Item -Path (Split-Path $src.ModuleBase) -Destination $dstRoot -Recurse -Force
+            Write-Host "  $mod copied to AllUsers from $($src.ModuleBase)" -ForegroundColor Green
+            $installed = $true
         }
-        # Verify
-        $check = Get-Module -ListAvailable $mod |
-                 Where-Object { $_.ModuleBase -notmatch [regex]::Escape($env:USERPROFILE) }
-        if ($check) {
-            Write-Host "  $mod installed at: $($check.ModuleBase)" -ForegroundColor Green
-        } else {
-            Write-Warning "$mod was NOT installed to AllUsers — dashboard may fail when running as SYSTEM."
-            Write-Warning "Run manually as admin: Install-Module $mod -Scope AllUsers -Force"
-        }
+    }
+
+    if (-not $installed) {
+        Write-Warning "$mod could not be installed AllUsers — dashboard may fail as SYSTEM."
+        Write-Warning "Run in a fresh admin shell: Install-Module $mod -Scope AllUsers -Force"
     }
 }
 
