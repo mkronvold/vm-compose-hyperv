@@ -1037,7 +1037,32 @@ function Show-WebServiceStatus {
     Write-Host "$Label" -NoNewline
     Write-Host "  $state" -NoNewline -ForegroundColor $color
     Write-Host "  via $via" -ForegroundColor Gray
-    if ($s.running) { Write-Host "  $Url" -ForegroundColor Cyan }
+
+    if ($s.running) {
+        Write-Host "  $Url" -ForegroundColor Cyan
+
+        # HTTP health check (-SkipHttpErrorCheck lets us read 4xx/5xx bodies without throwing)
+        try {
+            $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 5 `
+                        -SkipHttpErrorCheck -ErrorAction Stop
+            $code = [int]$resp.StatusCode
+            if ($code -lt 400) {
+                Write-Host "  HTTP $code  OK" -ForegroundColor Green
+            } else {
+                Write-Host "  HTTP $code  error" -ForegroundColor Red
+                $body = ($resp.Content -replace '<[^>]+>','' -replace '\s+',' ').Trim()
+                $snippet = if ($body.Length -gt 200) { $body.Substring(0,200) + '...' } else { $body }
+                if ($snippet) { Write-Host "  $snippet" -ForegroundColor DarkRed }
+            }
+        } catch {
+            $msg = $_.Exception.Message
+            if ($msg -match 'connect|refused|timed? ?out|unreachable') {
+                Write-Host "  HTTP unreachable — process running but not yet listening" -ForegroundColor Yellow
+            } else {
+                Write-Host "  HTTP check failed: $msg" -ForegroundColor Yellow
+            }
+        }
+    }
 }
 
 function Remove-WebService {
