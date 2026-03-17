@@ -42,6 +42,7 @@ param(
     [Parameter(Position=3)]
     [string]$StorageName,
     [switch]$DryRun,
+    [switch]$Force,
     [switch]$Help,
     [Alias("h")][switch]$HelpShort,
     [string]$ConfigFile = "vmstack.yaml",
@@ -81,14 +82,15 @@ COMMANDS
 
 OPTIONS
   -DryRun         Preview changes without executing them
+  -Force          Skip confirmation prompts (e.g. rebuild existing VM)
   -ConfigFile     Path to YAML config (default: vmstack.yaml)
-  -VmRoot         Root path for VM storage (default: D:\HyperV\VMs)
+  -VmRoot         Root path for VM storage (default: C:\HyperV\VMs)
   -Help, -h       Show this help message
 "@
 
 $CommandHelp = @{
     "up"       = "up [<vm>] [-DryRun]`n  Build and START VMs defined in vmstack.yaml.`n  Omit <vm> to target all; specify a VM name to target one.`n  Creates OS disk, persistent disk, unattend.vhdx, unattend.xml, bootstrap.ps1,`n  attaches networks and shared storage, then starts the VM.`n  If a VM already exists, starts it if stopped."
-    "build"    = "build [-DryRun]`n  Provision all VMs (create disks, VM definition) WITHOUT starting them.`n  If a VM already exists, reports its state and does nothing."
+    "build"    = "build [<vm>] [-Force] [-DryRun]`n  Provision VMs (create disks, VM definition) WITHOUT starting them.`n  Omit <vm> to target all; specify a VM name to target one.`n  If a VM already exists, prompts to rebuild (destroy + recreate).`n  Use -Force to rebuild without prompting."
     "down"     = "down [-DryRun]`n  Stop all VMs (forced power-off)."
     "restart"  = "restart [-DryRun]`n  Restart all VMs."
     "destroy"  = "destroy [-DryRun]`n  Delete VM definitions. Persistent storage VHDXes are preserved."
@@ -249,25 +251,42 @@ function Initialize-Networks {
 }
 
 function Build-VM {
-    param($vmName, $cfg, [switch]$AutoStart)
+    param($vmName, $cfg, [switch]$AutoStart, [switch]$Rebuild)
 
     Write-Host ""
     Write-Host "=== Building VM: $vmName ==="
 
-    # If the VM already exists, optionally start it (up only), otherwise report status
+    # If the VM already exists, handle rebuild or start logic
     $existingVm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
     if ($existingVm) {
-        if ($AutoStart) {
+        if ($AutoStart -and -not $Rebuild) {
             if ($existingVm.State -eq 'Running') {
                 Write-Host "VM '$vmName' is already running." -ForegroundColor Green
             } else {
                 Write-Host "VM '$vmName' already exists (state: $($existingVm.State)). Starting..." -ForegroundColor Yellow
                 Invoke-IfLive "Start-VM $vmName" { Start-VM -Name $vmName }
             }
-        } else {
-            Write-Host "VM '$vmName' already exists (state: $($existingVm.State)). Nothing to build." -ForegroundColor Yellow
+            return
         }
-        return
+
+        if (-not $Rebuild) {
+            Write-Host "VM '$vmName' already exists (state: $($existingVm.State))." -ForegroundColor Yellow
+            $answer = Read-Host "  Rebuild? This will DESTROY the VM and recreate it. [y/N]"
+            if ($answer -notmatch '^[Yy]') {
+                Write-Host "Skipping '$vmName'." -ForegroundColor Gray
+                return
+            }
+        }
+
+        # Destroy VM before rebuilding
+        Write-Host "Destroying '$vmName' for rebuild..." -ForegroundColor Yellow
+        Invoke-IfLive "Stop-VM $vmName (force)" {
+            if ($existingVm.State -ne 'Off') { Stop-VM -Name $vmName -Force }
+        }
+        Invoke-IfLive "Remove-VM $vmName" {
+            Remove-VM -Name $vmName -Force
+        }
+        Write-Host "VM '$vmName' removed. Rebuilding..."
     }
 
     # -------------------------
@@ -995,7 +1014,7 @@ switch ($Command) {
         Assert-Admin
         Initialize-Networks
         foreach ($vm in (Resolve-TargetVMs $VmName)) {
-            Build-VM $vm $stack.vms[$vm]
+            Build-VM $vm $stack.vms[$vm] -Rebuild:$Force
         }
     }
 
