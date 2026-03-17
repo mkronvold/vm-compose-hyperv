@@ -167,6 +167,12 @@ function Invoke-IfLive {
     }
 }
 
+if (-not (Get-Module -ListAvailable -Name powershell-yaml)) {
+    Write-Host "Installing required module: powershell-yaml..." -ForegroundColor Cyan
+    Install-Module powershell-yaml -Scope CurrentUser -Force -ErrorAction Stop
+}
+Import-Module powershell-yaml -ErrorAction Stop
+
 $stack = Get-Content $ConfigFile | ConvertFrom-Yaml
 $vms = $stack.vms.Keys
 
