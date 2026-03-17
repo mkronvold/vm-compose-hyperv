@@ -167,7 +167,13 @@ $($_.ScriptStackTrace)</pre>
             $diskList  = ($disks.Path        | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
             $ipList    = ($ips               | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
             $snapList  = ($snaps.Name        | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
-            $swList    = ($adapters.SwitchName | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
+            $macList   = ($adapters | ForEach-Object {
+                $mac = $_.MacAddress -replace '(..)(?!$)','$1:'
+                "<li class='list-group-item'><code>$mac</code>&nbsp;<span class='text-muted small'>$($_.Name)</span></li>"
+            }) -join ""
+            $swList    = ($adapters | ForEach-Object {
+                "<li class='list-group-item'>$($_.SwitchName)&nbsp;<span class='text-muted small'>$($_.Name)</span></li>"
+            }) -join ""
 
             Write-PodeHtmlResponse -Value @"
 <!doctype html>
@@ -197,6 +203,7 @@ $($_.ScriptStackTrace)</pre>
     </div>
     <div class="col-md-8">
       <h5>IP Addresses</h5><ul class="list-group mb-3">$(if ($ipList) { $ipList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
+      <h5>MAC Addresses</h5><ul class="list-group mb-3">$(if ($macList) { $macList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
       <h5>Switches</h5><ul class="list-group mb-3">$(if ($swList) { $swList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
       <h5>Disks</h5><ul class="list-group mb-3">$(if ($diskList) { $diskList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
       <h5>Checkpoints</h5><ul class="list-group mb-3">$(if ($snapList) { $snapList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
