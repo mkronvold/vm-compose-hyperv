@@ -57,7 +57,8 @@ USAGE
   ./vm-compose.ps1 <command> [options]
 
 COMMANDS
-  up / build      Build and start all VMs
+  up              Build and start all VMs
+  build           Provision all VMs without starting them
   down            Stop all VMs
   restart         Restart all VMs
   destroy         Delete VM definitions (persistent disks preserved)
@@ -85,8 +86,8 @@ OPTIONS
 "@
 
 $CommandHelp = @{
-    "up"       = "up / build [-DryRun]`n  Build and start all VMs defined in vmstack.yaml.`n  Creates OS disk, persistent disk, floppy, unattend.xml, bootstrap.ps1,`n  attaches networks and shared storage, then starts the VM."
-    "build"    = "up / build [-DryRun]`n  Alias for 'up'. Build and start all VMs defined in vmstack.yaml."
+    "up"       = "up [-DryRun]`n  Build and START all VMs defined in vmstack.yaml.`n  Creates OS disk, persistent disk, floppy, unattend.xml, bootstrap.ps1,`n  attaches networks and shared storage, then starts the VM.`n  If a VM already exists, starts it if stopped."
+    "build"    = "build [-DryRun]`n  Provision all VMs (create disks, VM definition) WITHOUT starting them.`n  If a VM already exists, reports its state and does nothing."
     "down"     = "down [-DryRun]`n  Stop all VMs (forced power-off)."
     "restart"  = "restart [-DryRun]`n  Restart all VMs."
     "destroy"  = "destroy [-DryRun]`n  Delete VM definitions. Persistent storage VHDXes are preserved."
@@ -219,19 +220,23 @@ if ($stack.networks) {
 }
 
 function Build-VM {
-    param($vmName, $cfg)
+    param($vmName, $cfg, [switch]$AutoStart)
 
     Write-Host ""
     Write-Host "=== Building VM: $vmName ==="
 
-    # If the VM already exists, just ensure it's running
+    # If the VM already exists, optionally start it (up only), otherwise report status
     $existingVm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
     if ($existingVm) {
-        if ($existingVm.State -eq 'Running') {
-            Write-Host "VM '$vmName' is already running." -ForegroundColor Green
+        if ($AutoStart) {
+            if ($existingVm.State -eq 'Running') {
+                Write-Host "VM '$vmName' is already running." -ForegroundColor Green
+            } else {
+                Write-Host "VM '$vmName' already exists (state: $($existingVm.State)). Starting..." -ForegroundColor Yellow
+                Invoke-IfLive "Start-VM $vmName" { Start-VM -Name $vmName }
+            }
         } else {
-            Write-Host "VM '$vmName' already exists (state: $($existingVm.State)). Starting..." -ForegroundColor Yellow
-            Invoke-IfLive "Start-VM $vmName" { Start-VM -Name $vmName }
+            Write-Host "VM '$vmName' already exists (state: $($existingVm.State)). Nothing to build." -ForegroundColor Yellow
         }
         return
     }
@@ -459,12 +464,16 @@ docker pull mcr.microsoft.com/windows/servercore:ltsc2022
         }
     }
 
-    Invoke-IfLive "Set-VMFirmware $vmName -EnableSecureBoot Off + Start-VM" {
+    Invoke-IfLive "Set-VMFirmware $vmName -EnableSecureBoot Off" {
         Set-VMFirmware -VMName $vmName -EnableSecureBoot Off
-        Start-VM $vmName
     }
 
-    Write-Host "VM '$vmName' started and installing automatically."
+    if ($AutoStart) {
+        Invoke-IfLive "Start-VM $vmName" { Start-VM $vmName }
+        Write-Host "VM '$vmName' started and installing automatically."
+    } else {
+        Write-Host "VM '$vmName' built. Run 'up' to start it." -ForegroundColor Cyan
+    }
 }
 
 function Stop-AllVMs {
@@ -851,7 +860,7 @@ if ($VmName -eq "help" -or $ExecCommand -eq "help" -or $StorageName -eq "help") 
 switch ($Command) {
     "up" {
         foreach ($vm in $vms) {
-            Build-VM $vm $stack.vms[$vm]
+            Build-VM $vm $stack.vms[$vm] -AutoStart
         }
     }
 
