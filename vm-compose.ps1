@@ -667,7 +667,10 @@ Write-Host "Bootstrap started: `$(Get-Date)"
 # Set network profile to Private (suppress location dialog)
 Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
 
-# Bring offline disks online (Windows marks VHDXes offline by admin policy after reboot)
+# Set SAN policy to OnlineAll so VHDX disks come up online after every reboot
+Set-StorageSetting -NewDiskPolicy OnlineAll -ErrorAction SilentlyContinue
+
+# Bring any currently offline disks online
 Get-Disk | Where-Object IsOffline | ForEach-Object {
     Write-Host "Bringing disk `$(`$_.Number) (`$(`$_.FriendlyName)) online..."
     Set-Disk -Number `$_.Number -IsOffline `$false
@@ -690,13 +693,21 @@ Get-Disk | Where-Object { `$_.PartitionStyle -ne 'RAW' -and -not `$_.IsOffline }
     ForEach-Object { `$_ | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue }
 
 # Pin drive letters: DockerData (persistent) → P:, SharedData → S:
+# Handles both wrong-letter and no-letter cases by finding the partition via volume label
 @([PSCustomObject]@{ Label = 'DockerData'; Letter = 'P' }, [PSCustomObject]@{ Label = 'SharedData'; Letter = 'S' }) |
 ForEach-Object {
-    `$vol = Get-Volume -FileSystemLabel `$_.Label -ErrorAction SilentlyContinue
-    if (`$vol -and `$vol.DriveLetter -and `$vol.DriveLetter -ne `$_.Letter) {
-        Get-Partition -DriveLetter `$vol.DriveLetter -ErrorAction SilentlyContinue |
-            Set-Partition -NewDriveLetter `$_.Letter -ErrorAction SilentlyContinue
-        Write-Host "Assigned `$(`$_.Letter): to `$(`$_.Label)"
+    `$pinLabel = `$_.Label; `$pinLetter = `$_.Letter
+    `$vol = Get-Volume -FileSystemLabel `$pinLabel -ErrorAction SilentlyContinue
+    if (-not `$vol) { return }
+    if (`$vol.DriveLetter -eq `$pinLetter) { return }
+    `$part = Get-Disk | Where-Object { -not `$_.IsOffline -and `$_.PartitionStyle -ne 'RAW' } |
+        Get-Partition |
+        Where-Object { `$_.Size -gt 100MB -and `$_.Type -notin @('System','Reserved','Recovery') } |
+        Where-Object { (Get-Volume -Partition `$_ -ErrorAction SilentlyContinue).FileSystemLabel -eq `$pinLabel } |
+        Select-Object -First 1
+    if (`$part) {
+        `$part | Set-Partition -NewDriveLetter `$pinLetter -ErrorAction SilentlyContinue
+        Write-Host "Assigned `$(`$pinLetter): to `$pinLabel"
     }
 }
 
@@ -826,13 +837,21 @@ Stop-Transcript | Out-Null
             $storagePath = Resolve-StoragePath $storageCfg.path
             Invoke-IfLive "Create shared VHDX $storagePath ($($storageCfg.size_gb) GB) if missing" {
                 if (-not (Test-Path $storagePath)) {
-                    New-Item -ItemType Directory -Path (Split-Path $storagePath) -Force | Out-Null
-                    New-VHD -Path $storagePath -SizeBytes ($storageCfg.size_gb * 1GB) -Dynamic | Out-Null
-                    Initialize-SharedVHDX -Path $storagePath -Label $storageName
+                    try {
+                        New-Item -ItemType Directory -Path (Split-Path $storagePath) -Force | Out-Null
+                        New-VHD -Path $storagePath -SizeBytes ($storageCfg.size_gb * 1GB) -Dynamic | Out-Null
+                        Initialize-SharedVHDX -Path $storagePath -Label $storageName
+                    } catch {
+                        Write-Host "WARNING: Could not create shared VHDX for '$storageName': $_" -ForegroundColor Yellow
+                    }
                 }
             }
             Invoke-IfLive "Add-VMHardDiskDrive $vmName <- $storagePath" {
-                Add-VMHardDiskDrive -VMName $vmName -Path $storagePath | Out-Null
+                try {
+                    Add-VMHardDiskDrive -VMName $vmName -Path $storagePath | Out-Null
+                } catch {
+                    Write-Host "WARNING: Could not attach shared VHDX '$storageName' to '$vmName': $_" -ForegroundColor Yellow
+                }
             }
             Write-Host "Mounted shared storage '$storageName' on $vmName"
         }
