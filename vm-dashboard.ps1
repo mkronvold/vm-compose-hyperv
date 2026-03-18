@@ -127,9 +127,9 @@ Start-PodeServer -Threads 2 {
                         if ($vhd -and $vhd.Size -gt 0) {
                             $pctAlloc = '{0:0}%' -f ($vhd.FileSize / $vhd.Size * 100)
                         }
-                        $diskNum = $null; $dn = $vhd.DiskNumber
-                        if ($dn -is [uint32] -or $dn -is [int]) { $diskNum = [int]$dn }
-                        if ($vhd -and $vhd.Attached -and $null -ne $diskNum -and $diskNum -ge 0) {
+                        $diskNum = $null; $dnStr = "$($vhd.DiskNumber)"
+                        if ($vhd -and $vhd.Attached -and $dnStr -match '^\d+$') { $diskNum = [int]$dnStr }
+                        if ($null -ne $diskNum) {
                             $dl = Get-Disk -Number $diskNum -ErrorAction SilentlyContinue |
                                   Get-Partition -ErrorAction SilentlyContinue |
                                   Where-Object { $_.DriveLetter -and $_.DriveLetter -ne [char]0 } |
@@ -307,10 +307,9 @@ $($_.ScriptStackTrace)</pre>
                 $rawPath = $stack.storage[$storageName].path
                 $sp = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
                 $vhd = Get-VHD -Path $sp -ErrorAction SilentlyContinue
-                $dn = $vhd.DiskNumber
-                if ($vhd -and $vhd.Attached -and ($dn -is [uint32] -or $dn -is [int]) -and [int]$dn -ge 0) {
-                    $hasHostMountedConflict = $true
-                    break
+                $dnStr = "$($vhd.DiskNumber)"
+                if ($vhd -and $vhd.Attached -and $dnStr -match '^\d+$') {
+                    $hasHostMountedConflict = $true; break
                 }
             }
 
@@ -342,10 +341,9 @@ $($_.ScriptStackTrace)</pre>
                 $rawPath = $stack.storage[$storageName].path
                 $sp = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
                 $vhd = Get-VHD -Path $sp -ErrorAction SilentlyContinue
-                $dn = $vhd.DiskNumber
-                if ($vhd -and $vhd.Attached -and ($dn -is [uint32] -or $dn -is [int]) -and [int]$dn -ge 0) {
-                    $hasHostMountedConflict = $true
-                    break
+                $dnStr = "$($vhd.DiskNumber)"
+                if ($vhd -and $vhd.Attached -and $dnStr -match '^\d+$') {
+                    $hasHostMountedConflict = $true; break
                 }
             }
 
