@@ -1125,6 +1125,14 @@ function Test-AllVMs {
                                    $_.FileSystemLabel -notin @('','DockerData') -and
                                    $_.DriveLetter -ne 'C' }
 
+                # Windows Eval license — days remaining (GracePeriodRemaining is in minutes)
+                $evalDays = $null
+                $slp = Get-WmiObject -Class SoftwareLicensingProduct -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ApplicationID -eq '55c92734-d682-4d71-983e-d6ec3f16059f' -and
+                                   $_.PartialProductKey -and $_.GracePeriodRemaining -gt 0 } |
+                    Select-Object -First 1
+                if ($slp) { $evalDays = [math]::Floor($slp.GracePeriodRemaining / 1440) }
+
                 # Bootstrap log last line
                 $lastLine = if (Test-Path 'C:\Setup\bootstrap.log') {
                     (Get-Content 'C:\Setup\bootstrap.log' | Select-String 'Bootstrap' | Select-Object -Last 1).Line
@@ -1138,6 +1146,7 @@ function Test-AllVMs {
                     DaemonJson    = $daemonJson
                     DataRoot      = $dataRoot
                     SharedVols    = $sharedVols | ForEach-Object { "$($_.DriveLetter): $($_.FileSystemLabel)" }
+                    EvalDays      = $evalDays
                     BootstrapLast = $lastLine
                 }
             } -ErrorAction Stop
@@ -1158,6 +1167,10 @@ function Test-AllVMs {
                 }
             } else {
                 Write-Host "  [ ] Shared volumes         (none mounted)" -ForegroundColor DarkGray
+            }
+            if ($null -ne $checks.EvalDays) {
+                $evalColor = if ($checks.EvalDays -le 14) { 'Red' } elseif ($checks.EvalDays -le 30) { 'Yellow' } else { 'Cyan' }
+                Write-Host ("  [i] {0,-22} {1}" -f 'Eval license' "$($checks.EvalDays) days remaining") -ForegroundColor $evalColor
             }
             Write-Host "  Bootstrap: $($checks.BootstrapLast)" -ForegroundColor $(if ($checks.BootstrapLast -like '*complete*') { 'Green' } else { 'Yellow' })
 

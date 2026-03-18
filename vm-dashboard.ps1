@@ -82,9 +82,26 @@ Start-PodeServer -Threads 2 {
                     "Running" { "success" } "Off" { "secondary" } "Saved" { "info" }
                     "Paused"  { "warning" } default { "danger" }
                 }
+                # Eval days remaining (only query when VM is running, non-blocking)
+                $evalBadge = ''
+                if ($vm.State -eq 'Running') {
+                    try {
+                        $slp = Invoke-Command -VMName $vmName -ScriptBlock {
+                            Get-WmiObject -Class SoftwareLicensingProduct -ErrorAction SilentlyContinue |
+                                Where-Object { $_.ApplicationID -eq '55c92734-d682-4d71-983e-d6ec3f16059f' -and
+                                               $_.PartialProductKey -and $_.GracePeriodRemaining -gt 0 } |
+                                Select-Object -First 1 -ExpandProperty GracePeriodRemaining
+                        } -ErrorAction SilentlyContinue
+                        if ($slp) {
+                            $days = [math]::Floor($slp / 1440)
+                            $badgeColor = if ($days -le 14) { 'danger' } elseif ($days -le 30) { 'warning' } else { 'info' }
+                            $evalBadge = " <span class='badge bg-$badgeColor' title='Evaluation license'>Eval: $days d</span>"
+                        }
+                    } catch { }
+                }
                 $rows += @"
                 <tr>
-                  <td><a href="/vm/$vmName">$vmName</a></td>
+                  <td><a href="/vm/$vmName">$vmName</a>$evalBadge</td>
                   <td><span class="badge bg-$color">$($vm.State)</span></td>
                   <td>$cpuLabel</td>
                   <td>$memLabel</td>
