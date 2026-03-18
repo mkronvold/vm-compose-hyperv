@@ -711,7 +711,7 @@ if (-not (Get-Service docker -ErrorAction SilentlyContinue)) {
     Write-Host 'Installing Docker Engine...'
     # Fetch latest stable version tag from GitHub API
     `$release = Invoke-RestMethod 'https://api.github.com/repos/moby/moby/releases/latest' -UseBasicParsing
-    `$dockerVersion = `$release.tag_name.TrimStart('v')
+    `$dockerVersion = [regex]::Match(`$release.tag_name, '\d+\.\d+\.\d+').Value
     Write-Host "Docker version: `$dockerVersion"
     `$zipUrl = "https://download.docker.com/win/static/stable/x86_64/docker-`$dockerVersion.zip"
     Invoke-WebRequest -UseBasicParsing -Uri `$zipUrl -OutFile 'C:\Setup\docker.zip'
