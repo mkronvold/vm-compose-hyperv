@@ -450,7 +450,7 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
           </InstallFrom>
           <InstallTo>
             <DiskID>0</DiskID>
-            <PartitionID>2</PartitionID>
+            <PartitionID>3</PartitionID>
           </InstallTo>
         </OSImage>
       </ImageInstall>
@@ -467,6 +467,11 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
             </CreatePartition>
             <CreatePartition wcm:action="add">
               <Order>2</Order>
+              <Type>MSR</Type>
+              <Size>128</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>3</Order>
               <Type>Primary</Type>
               <Extend>true</Extend>
             </CreatePartition>
@@ -478,7 +483,7 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
               <Label>System</Label>
             </ModifyPartition>
             <ModifyPartition wcm:action="add">
-              <PartitionID>2</PartitionID>
+              <PartitionID>3</PartitionID>
               <Format>NTFS</Format>
               <Label>Windows</Label>
             </ModifyPartition>
