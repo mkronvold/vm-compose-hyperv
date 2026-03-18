@@ -41,6 +41,8 @@ param(
     [string]$ExecCommand,
     [Parameter(Position=3)]
     [string]$StorageName,
+    [Parameter(Position=4)]
+    [string]$ExtraArg,
     [switch]$DryRun,
     [switch]$Force,
     [switch]$Help,
@@ -77,11 +79,15 @@ COMMANDS
   version         Show version info
   mount <vm> <storage>    Hot-add a shared storage disk to a VM
   unmount <vm> <storage>  Remove a shared storage disk from a VM
-  storage ls              List shared storage volumes (size, % used, mount status)
-  storage rm <name>       Delete a storage VHDX (must be unmounted first)
-  storage mv <name> <dst> Move a storage VHDX to a new path (must be unmounted first)
-  localmount <name> [S]   Mount a storage VHDX to a host drive letter (default S:)
-  localunmount <name>     Dismount a storage VHDX from the host
+  storage shared ls              List shared storage volumes
+  storage shared localmount <n>  Mount shared VHDX on host (default S:)
+  storage shared localunmount <n> Dismount shared VHDX from host
+  storage shared health [n]      Health check for shared storage
+  storage pv ls                  List persistent volumes (one per VM)
+  storage pv localmount <vm>     Mount VM's persistent disk on host (default P:)
+  storage pv localunmount <vm>   Dismount persistent disk from host
+  storage pv create/destroy <vm> Create or delete a PV VHDX
+  storage pv health [vm]         Health check for persistent volumes
   cp / copy <src> <dest>  Copy files to/from a VM  (prefix VM paths: vmname:path)
   note <show|add|edit> <vm>  Show, append to, or edit VM notes
 
@@ -118,7 +124,7 @@ $CommandHelp = @{
     "version"  = "version`n  Print version, PowerShell version, and active config file path."
     "mount"    = "mount <vm> <storageName>`n  Hot-add a shared storage VHDX (from the storage: section) to a running VM."
     "unmount"  = "unmount <vm> <storageName>`n  Remove a shared storage VHDX from a VM."
-    "storage"  = "storage <ls|rm|mv> [args]`n  Manage shared storage VHDXes.`n  ls / list              List all volumes (path, size, % allocated, mount status)`n  rm / remove <name>     Delete a VHDX (must be unmounted)`n  mv / move <name> <dst> Move a VHDX to a new path (must be unmounted; update vmstack.yaml path after)"
+    "storage"  = "storage <shared|pv> <subcommand> [name] [extra]`n  Manage shared storage and persistent volumes.`n`n  SHARED STORAGE (defined in vmstack.yaml storage: section):`n  storage shared ls                   List all volumes`n  storage shared create <name>        Create and initialize VHDX`n  storage shared rm <name>            Delete VHDX (must be unmounted)`n  storage shared mv <name> <dst>      Move VHDX (must be unmounted)`n  storage shared localmount <n> [S]   Mount on host at drive letter (default S:)`n  storage shared localunmount <n>     Dismount from host`n  storage shared health [name]        Detailed health check`n`n  PERSISTENT VOLUMES (one per VM, mounted as P: in the VM):`n  storage pv ls [vm]                  List all PVs`n  storage pv create <vm>              Create VHDX`n  storage pv destroy <vm>             Delete VHDX`n  storage pv localmount <vm> [P]      Mount on host at drive letter (default P:)`n  storage pv localunmount <vm>        Dismount from host`n  storage pv health [vm]              Detailed health check`n`n  Backward compat: storage ls / rm / mv / init work as before (defaults to shared)"
     "localmount"   = "localmount <storageName> [driveLetter]`n  Mount a shared storage VHDX to a host drive letter (default S:).`n  Allows direct file access like a Docker volume.`n  Local mount and VM use are mutually exclusive."
     "localunmount" = "localunmount <storageName>`n  Dismount a shared storage VHDX from the host drive."
     "cp"       = "cp / copy <source> <destination>`n  Copy files between host and a running VM.`n  Host to VM:  cp C:\local\file.txt  myvm:C:\dest\`n  VM to host:  cp myvm:C:\path\file.txt  .`n  Prefix VM paths with vmname: (colon). VM-to-host prompts for Administrator credentials."
@@ -1406,12 +1412,17 @@ function Dismount-LocalStorage {
 }
 
 
-function Invoke-StorageCommand {
-    param([string]$SubCmd, [string]$StorageArg, [string]$DestArg)
+function Get-PVPath {
+    param([string]$VmName)
+    return Join-Path $VmRoot $VmName "persistent-storage.vhdx"
+}
 
-    switch -Regex ($SubCmd.ToLower()) {
+function Invoke-SharedStorageCommand {
+    param([string]$SubCmd, [string]$Name, [string]$Extra)
 
-        '^(ls|list)$' {
+    switch -Regex ($(if ($SubCmd) { $SubCmd.ToLower() } else { '' })) {
+
+        '^(ls|list|)$' {
             if (-not $stack.storage) { Write-Host "No storage: section in $ConfigFile" -ForegroundColor Yellow; return }
             $cols = @(
                 @{L='Name';      E={ $_.Name }},
@@ -1426,9 +1437,7 @@ function Invoke-StorageCommand {
                     if (Test-Path $p) {
                         try {
                             $vhd = Get-VHD -Path $p -ErrorAction SilentlyContinue
-                            if ($vhd -and $vhd.Size -gt 0) {
-                                '{0:0}%' -f ($vhd.FileSize / $vhd.Size * 100)
-                            } else { '-' }
+                            if ($vhd -and $vhd.Size -gt 0) { '{0:0}%' -f ($vhd.FileSize / $vhd.Size * 100) } else { '-' }
                         } catch { '-' }
                     } else { 'MISSING' }
                 }},
@@ -1440,29 +1449,23 @@ function Invoke-StorageCommand {
                     if ($vms) { $vms -join ',' } else { '-' }
                 }}
             )
-            $stack.storage.GetEnumerator() | ForEach-Object { [PSCustomObject]@{
-                Name    = $_.Key
-                Value   = $_.Value
-            }} | Format-Table $cols -AutoSize
+            $stack.storage.GetEnumerator() | ForEach-Object { [PSCustomObject]@{ Name = $_.Key; Value = $_.Value } } |
+                Format-Table $cols -AutoSize
         }
 
-        '^(rm|remove)$' {
-            if (-not $StorageArg) { Write-Host "Usage: storage rm <storageName>" -ForegroundColor Yellow; return }
-            if (-not $stack.storage -or -not $stack.storage[$StorageArg]) {
-                Write-Host "Storage '$StorageArg' not found in $ConfigFile" -ForegroundColor Red; return
+        '^(rm|remove|destroy)$' {
+            if (-not $Name) { Write-Host "Usage: storage shared rm <storageName>" -ForegroundColor Yellow; return }
+            if (-not $stack.storage -or -not $stack.storage[$Name]) {
+                Write-Host "Storage '$Name' not found in $ConfigFile" -ForegroundColor Red; return
             }
-            $storagePath = Resolve-StoragePath $stack.storage[$StorageArg].path
-            if (-not (Test-Path $storagePath)) {
-                Write-Host "File not found: $storagePath" -ForegroundColor Yellow; return
-            }
-            # Check for active mounts
+            $storagePath = Resolve-StoragePath $stack.storage[$Name].path
+            if (-not (Test-Path $storagePath)) { Write-Host "File not found: $storagePath" -ForegroundColor Yellow; return }
             $mounted = Get-VM -ErrorAction SilentlyContinue |
                 Where-Object { (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue | Where-Object Path -eq $storagePath) } |
                 Select-Object -ExpandProperty Name
             if ($mounted) {
-                Write-Host "ERROR: '$StorageArg' is currently mounted on: $($mounted -join ', ')" -ForegroundColor Red
-                Write-Host "  Unmount first: vm-compose.ps1 unmount <vm> $StorageArg" -ForegroundColor Gray
-                return
+                Write-Host "ERROR: '$Name' is currently mounted on: $($mounted -join ', ')" -ForegroundColor Red
+                Write-Host "  Unmount first: vm-compose.ps1 unmount <vm> $Name" -ForegroundColor Gray; return
             }
             $ans = Read-Host "Delete '$storagePath'? This cannot be undone. [y/N]"
             if ($ans -notmatch '^[Yy]') { Write-Host "Cancelled."; return }
@@ -1471,60 +1474,259 @@ function Invoke-StorageCommand {
         }
 
         '^(mv|move)$' {
-            if (-not $StorageArg -or -not $DestArg) {
-                Write-Host "Usage: storage mv <storageName> <newPath>" -ForegroundColor Yellow; return
+            if (-not $Name -or -not $Extra) {
+                Write-Host "Usage: storage shared mv <storageName> <newPath>" -ForegroundColor Yellow; return
             }
-            if (-not $stack.storage -or -not $stack.storage[$StorageArg]) {
-                Write-Host "Storage '$StorageArg' not found in $ConfigFile" -ForegroundColor Red; return
+            if (-not $stack.storage -or -not $stack.storage[$Name]) {
+                Write-Host "Storage '$Name' not found in $ConfigFile" -ForegroundColor Red; return
             }
-            $storagePath = Resolve-StoragePath $stack.storage[$StorageArg].path
-            if (-not (Test-Path $storagePath)) {
-                Write-Host "File not found: $storagePath" -ForegroundColor Yellow; return
-            }
-            # Check for active mounts
+            $storagePath = Resolve-StoragePath $stack.storage[$Name].path
+            if (-not (Test-Path $storagePath)) { Write-Host "File not found: $storagePath" -ForegroundColor Red; return }
             $mounted = Get-VM -ErrorAction SilentlyContinue |
                 Where-Object { (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue | Where-Object Path -eq $storagePath) } |
                 Select-Object -ExpandProperty Name
             if ($mounted) {
-                Write-Host "ERROR: '$StorageArg' is currently mounted on: $($mounted -join ', ')" -ForegroundColor Red
-                Write-Host "  Unmount first: vm-compose.ps1 unmount <vm> $StorageArg" -ForegroundColor Gray
-                return
+                Write-Host "ERROR: '$Name' is currently mounted on: $($mounted -join ', ')" -ForegroundColor Red
+                Write-Host "  Unmount first: vm-compose.ps1 unmount <vm> $Name" -ForegroundColor Gray; return
             }
-            $dest = if ([System.IO.Path]::IsPathRooted($DestArg)) { $DestArg } else { Join-Path $VmRoot $DestArg }
-            # If dest is a directory, keep the original filename
-            if ((Test-Path $dest) -and (Get-Item $dest).PSIsContainer) {
-                $dest = Join-Path $dest (Split-Path $storagePath -Leaf)
-            }
+            $dest = if ([System.IO.Path]::IsPathRooted($Extra)) { $Extra } else { Join-Path $VmRoot $Extra }
+            if ((Test-Path $dest) -and (Get-Item $dest).PSIsContainer) { $dest = Join-Path $dest (Split-Path $storagePath -Leaf) }
             Move-Item $storagePath $dest -Force
-            Write-Host "Moved $storagePath → $dest" -ForegroundColor Green
-            Write-Host "  Update path: in $ConfigFile" -ForegroundColor Yellow
+            Write-Host "Moved $storagePath -> $dest" -ForegroundColor Green
+            Write-Host "  Update path in $ConfigFile" -ForegroundColor Yellow
         }
 
         '^(init|initialize)$' {
-            $storageName = $StorageArg
-            if (-not $storageName -or -not $stack.storage -or -not $stack.storage[$storageName]) {
-                Write-Host "Usage: ./vm-compose.ps1 storage init <name>" -ForegroundColor Yellow; return
+            if (-not $Name -or -not $stack.storage -or -not $stack.storage[$Name]) {
+                Write-Host "Usage: storage shared init <name>" -ForegroundColor Yellow; return
             }
-            $storagePath = Resolve-StoragePath $stack.storage[$storageName].path
-            if (-not (Test-Path $storagePath)) {
-                Write-Host "VHDX not found: $storagePath" -ForegroundColor Red; return
-            }
-            $vmsMounted = @(Get-VM | Where-Object {
-                (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue).Path -contains $storagePath
-            })
+            $storagePath = Resolve-StoragePath $stack.storage[$Name].path
+            if (-not (Test-Path $storagePath)) { Write-Host "VHDX not found: $storagePath" -ForegroundColor Red; return }
+            $vmsMounted = @(Get-VM | Where-Object { (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue).Path -contains $storagePath })
             if ($vmsMounted.Count -gt 0) {
                 Write-Host "Cannot init while mounted on VM(s): $($vmsMounted.Name -join ', ')" -ForegroundColor Red; return
             }
-            Initialize-SharedVHDX -Path $storagePath -Label $storageName
+            Initialize-SharedVHDX -Path $storagePath -Label $Name
+        }
+
+        '^(create)$' {
+            if (-not $Name) { Write-Host "Usage: storage shared create <name>" -ForegroundColor Yellow; return }
+            if (-not $stack.storage -or -not $stack.storage[$Name]) {
+                Write-Host "Storage '$Name' not found in $ConfigFile" -ForegroundColor Red; return
+            }
+            $path = Resolve-StoragePath $stack.storage[$Name].path
+            if (Test-Path $path) { Write-Host "Already exists: $path" -ForegroundColor Yellow; return }
+            New-Item -ItemType Directory -Path (Split-Path $path) -Force | Out-Null
+            New-VHD -Path $path -SizeBytes ($stack.storage[$Name].size_gb * 1GB) -Dynamic | Out-Null
+            Initialize-SharedVHDX -Path $path -Label $Name
+            Write-Host "Created: $path" -ForegroundColor Green
+        }
+
+        '^(localmount)$' {
+            if (-not $Name) { Write-Host "Usage: storage shared localmount <name> [driveLetter]" -ForegroundColor Yellow; return }
+            $letter = if ($Extra) { $Extra } else { 'S' }
+            Mount-LocalStorage -StorageName $Name -DriveLetter $letter
+        }
+
+        '^(localunmount)$' {
+            if (-not $Name) { Write-Host "Usage: storage shared localunmount <name>" -ForegroundColor Yellow; return }
+            Dismount-LocalStorage -StorageName $Name
+        }
+
+        '^(health|status)$' {
+            if (-not $stack.storage) { Write-Host "No storage: section in $ConfigFile" -ForegroundColor Yellow; return }
+            $entries = if ($Name -and $stack.storage[$Name]) { @{ $Name = $stack.storage[$Name] } } else { $stack.storage }
+            foreach ($entry in $entries.GetEnumerator()) {
+                $p = Resolve-StoragePath $entry.Value.path
+                $exists = Test-Path $p
+                Write-Host ""
+                Write-Host "  Shared Storage: $($entry.Key)" -ForegroundColor Cyan
+                if (-not $exists) { Write-Host "  [!] VHDX NOT FOUND: $p" -ForegroundColor Red; continue }
+                $usedGB = [math]::Round((Get-Item $p).Length / 1GB, 2)
+                try { $vhd = Get-VHD -Path $p -ErrorAction SilentlyContinue } catch { $vhd = $null }
+                $pct = if ($vhd -and $vhd.Size -gt 0) { '{0:0}%' -f ($vhd.FileSize / $vhd.Size * 100) } else { '?' }
+                Write-Host ("  [+] {0}  ({1} GB used of {2} GB, {3} allocated)" -f $p, $usedGB, $entry.Value.size_gb, $pct) -ForegroundColor Green
+                $vms = Get-VM -ErrorAction SilentlyContinue | Where-Object {
+                    (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue | Where-Object Path -eq $p)
+                }
+                if ($vms) {
+                    Write-Host "  [+] VM(s): $($vms.Name -join ', ')" -ForegroundColor Green
+                } else {
+                    Write-Host "  [ ] Not attached to any VM" -ForegroundColor DarkGray
+                }
+                $hostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $p } | Select-Object -First 1
+                if ($hostDisk) {
+                    $vol = Get-Partition -DiskNumber $hostDisk.Number -ErrorAction SilentlyContinue |
+                        Get-Volume -ErrorAction SilentlyContinue | Where-Object DriveLetter | Select-Object -First 1
+                    Write-Host "  [i] Host-mounted at $($vol.DriveLetter):" -ForegroundColor Cyan
+                }
+            }
+            Write-Host ""
         }
 
         default {
-            Write-Host "Usage: ./vm-compose.ps1 storage <ls|rm|mv|init> [storageName] [destPath]" -ForegroundColor Yellow
+            Write-Host "Usage: ./vm-compose.ps1 storage shared <subcommand> [name] [extra]" -ForegroundColor Yellow
             Write-Host "  ls / list              List all shared storage volumes"
+            Write-Host "  create <name>          Create and initialize VHDX"
             Write-Host "  rm / remove <name>     Delete a storage VHDX (must be unmounted)"
             Write-Host "  mv / move <name> <dst> Move a storage VHDX (must be unmounted)"
-            Write-Host "  init <name>            Initialize a new/blank VHDX with GPT+NTFS"
+            Write-Host "  init <name>            Re-initialize an existing VHDX with GPT+NTFS"
+            Write-Host "  localmount <name> [S]  Mount on host at drive letter (default S:)"
+            Write-Host "  localunmount <name>    Dismount from host"
+            Write-Host "  health [name]          Detailed health check"
         }
+    }
+}
+
+function Invoke-PVCommand {
+    param([string]$SubCmd, [string]$VmArg, [string]$Extra)
+
+    switch -Regex ($(if ($SubCmd) { $SubCmd.ToLower() } else { '' })) {
+
+        '^(ls|list|)$' {
+            $targets = if ($VmArg) { @($VmArg) } else { @($stack.vms.Keys) }
+            Write-Host ""
+            Write-Host "  Persistent Volumes:" -ForegroundColor Cyan
+            Write-Host ("  {0,-14} {1,8}  {2,8}  {3}" -f 'VM', 'Used GB', 'Max GB', 'Status')
+            Write-Host ("  " + ("-" * 50))
+            foreach ($vm in $targets) {
+                $pvPath = Get-PVPath $vm
+                $exists = Test-Path $pvPath
+                $usedGB = if ($exists) { [math]::Round((Get-Item $pvPath).Length / 1GB, 2) } else { 0 }
+                $cfgGB  = if ($stack.vms[$vm]) { $stack.vms[$vm].persistent_disk_gb } else { '?' }
+                $vmObj  = Get-VM -Name $vm -ErrorAction SilentlyContinue
+                $attached = $exists -and $vmObj -and (Get-VMHardDiskDrive -VMName $vm -ErrorAction SilentlyContinue | Where-Object Path -eq $pvPath)
+                $hostDisk = if ($exists) { Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $pvPath } | Select-Object -First 1 } else { $null }
+                $status = if (-not $exists) { 'MISSING' } elseif ($hostDisk) { 'host-mounted' } elseif ($attached) { "vm-attached ($($vmObj.State))" } else { 'detached' }
+                $color  = switch -Wildcard ($status) { 'MISSING' { 'Red' } 'host-mounted' { 'Cyan' } 'vm-attached*' { 'Green' } default { 'DarkGray' } }
+                Write-Host ("  {0,-14} {1,8}  {2,8}  {3}" -f $vm, $usedGB, $cfgGB, $status) -ForegroundColor $color
+            }
+            Write-Host ""
+        }
+
+        '^(create)$' {
+            if (-not $VmArg) { Write-Host "Usage: storage pv create <vmName>" -ForegroundColor Yellow; return }
+            if (-not $stack.vms[$VmArg]) { Write-Host "VM '$VmArg' not found in $ConfigFile" -ForegroundColor Red; return }
+            $pvPath = Get-PVPath $VmArg
+            if (Test-Path $pvPath) { Write-Host "Already exists: $pvPath" -ForegroundColor Yellow; return }
+            $gb = $stack.vms[$VmArg].persistent_disk_gb
+            New-Item -ItemType Directory -Path (Split-Path $pvPath) -Force | Out-Null
+            New-VHD -Path $pvPath -SizeBytes ($gb * 1GB) -Dynamic | Out-Null
+            Write-Host "Created: $pvPath ($gb GB) — will be formatted on first VM boot (P:\DockerData)" -ForegroundColor Green
+        }
+
+        '^(rm|remove|destroy)$' {
+            if (-not $VmArg) { Write-Host "Usage: storage pv destroy <vmName>" -ForegroundColor Yellow; return }
+            $pvPath = Get-PVPath $VmArg
+            if (-not (Test-Path $pvPath)) { Write-Host "Not found: $pvPath" -ForegroundColor Yellow; return }
+            $vmState = (Get-VM -Name $VmArg -ErrorAction SilentlyContinue).State
+            if ($vmState -eq 'Running') { Write-Host "Stop VM '$VmArg' first." -ForegroundColor Red; return }
+            $hostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $pvPath } | Select-Object -First 1
+            if ($hostDisk) { Write-Host "PV is host-mounted. Run: storage pv localunmount $VmArg" -ForegroundColor Red; return }
+            $ans = Read-Host "Delete '$pvPath'? All Docker data will be lost. [y/N]"
+            if ($ans -notmatch '^[Yy]') { Write-Host "Cancelled."; return }
+            Remove-Item $pvPath -Force
+            Write-Host "Deleted: $pvPath" -ForegroundColor Green
+        }
+
+        '^(localmount)$' {
+            if (-not $VmArg) { Write-Host "Usage: storage pv localmount <vmName> [driveLetter]" -ForegroundColor Yellow; return }
+            $pvPath = Get-PVPath $VmArg
+            if (-not (Test-Path $pvPath)) { Write-Host "Not found: $pvPath" -ForegroundColor Red; return }
+            $letter = if ($Extra) { $Extra.TrimEnd(':').ToUpper() } else { 'P' }
+            $vmsRunning = Get-VM -ErrorAction SilentlyContinue | Where-Object {
+                $_.State -eq 'Running' -and (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue | Where-Object Path -eq $pvPath)
+            }
+            if ($vmsRunning) { Write-Host "PV in use by running VM: $($vmsRunning.Name -join ', ')" -ForegroundColor Red; return }
+            $existing = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $pvPath } | Select-Object -First 1
+            if ($existing) {
+                $vol = Get-Partition -DiskNumber $existing.Number -ErrorAction SilentlyContinue |
+                    Get-Volume -ErrorAction SilentlyContinue | Where-Object DriveLetter | Select-Object -First 1
+                Write-Host "Already mounted at $($vol.DriveLetter):" -ForegroundColor Yellow; return
+            }
+            if (Test-Path "${letter}:\") { Write-Host "Drive ${letter}: is already in use." -ForegroundColor Red; return }
+            Write-Host "Mounting $pvPath -> ${letter}:\"
+            $vhd  = Mount-VHD -Path $pvPath -PassThru -ErrorAction Stop
+            $disk = Get-Disk -Number $vhd.DiskNumber
+            if ($disk.IsOffline)  { Set-Disk -Number $disk.Number -IsOffline $false }
+            if ($disk.IsReadOnly) { Set-Disk -Number $disk.Number -IsReadOnly $false }
+            $part = Get-Partition -DiskNumber $disk.Number |
+                Where-Object { $_.Size -gt 100MB -and $_.Type -notin @('System','Reserved','Recovery') } |
+                Select-Object -First 1
+            if (-not $part) {
+                Write-Host "WARNING: No usable partition found — disk may not be initialized yet." -ForegroundColor Yellow; return
+            }
+            $part | Set-Partition -NewDriveLetter $letter
+            Write-Host "Mounted PV '$VmArg' at ${letter}:\" -ForegroundColor Green
+        }
+
+        '^(localunmount)$' {
+            if (-not $VmArg) { Write-Host "Usage: storage pv localunmount <vmName>" -ForegroundColor Yellow; return }
+            $pvPath = Get-PVPath $VmArg
+            $hostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $pvPath } | Select-Object -First 1
+            if (-not $hostDisk) { Write-Host "PV '$VmArg' is not locally mounted." -ForegroundColor Yellow; return }
+            Dismount-VHD -DiskNumber $hostDisk.Number -ErrorAction Stop
+            Write-Host "Unmounted PV '$VmArg'" -ForegroundColor Green
+        }
+
+        '^(health|status)$' {
+            $targets = if ($VmArg) { @($VmArg) } else { @($stack.vms.Keys) }
+            Write-Host ""
+            Write-Host "=== Persistent Volume Health ===" -ForegroundColor Cyan
+            foreach ($vm in $targets) {
+                $pvPath = Get-PVPath $vm
+                $exists = Test-Path $pvPath
+                Write-Host ""
+                Write-Host "  VM: $vm" -ForegroundColor Cyan
+                if (-not $exists) { Write-Host "  [!] VHDX not found: $pvPath" -ForegroundColor Red; continue }
+                $usedGB = [math]::Round((Get-Item $pvPath).Length / 1GB, 2)
+                $cfgGB  = if ($stack.vms[$vm]) { $stack.vms[$vm].persistent_disk_gb } else { '?' }
+                Write-Host "  [+] $pvPath" -ForegroundColor Green
+                try {
+                    $vhd = Get-VHD -Path $pvPath -ErrorAction Stop
+                    $pct = if ($vhd.Size -gt 0) { [math]::Round($vhd.FileSize / $vhd.Size * 100, 1) } else { 0 }
+                    Write-Host ("  [i] Size: {0} GB used of {1} GB ({2}% allocated)" -f $usedGB, $cfgGB, $pct) -ForegroundColor Cyan
+                } catch {
+                    Write-Host ("  [i] Size: {0} GB of {1} GB max" -f $usedGB, $cfgGB) -ForegroundColor Cyan
+                }
+                $vmObj    = Get-VM -Name $vm -ErrorAction SilentlyContinue
+                $attached = $vmObj -and (Get-VMHardDiskDrive -VMName $vm -ErrorAction SilentlyContinue | Where-Object Path -eq $pvPath)
+                if ($attached) {
+                    Write-Host "  [+] Attached to VM (state: $($vmObj.State))" -ForegroundColor Green
+                } elseif ($vmObj) {
+                    Write-Host "  [ ] Not attached to VM" -ForegroundColor Yellow
+                } else {
+                    Write-Host "  [ ] VM not built" -ForegroundColor DarkGray
+                }
+                $hostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $pvPath } | Select-Object -First 1
+                if ($hostDisk) {
+                    $vol = Get-Partition -DiskNumber $hostDisk.Number -ErrorAction SilentlyContinue |
+                        Get-Volume -ErrorAction SilentlyContinue | Where-Object DriveLetter | Select-Object -First 1
+                    Write-Host "  [i] Host-mounted at $($vol.DriveLetter):" -ForegroundColor Cyan
+                }
+            }
+            Write-Host ""
+        }
+
+        default {
+            Write-Host "Usage: ./vm-compose.ps1 storage pv <subcommand> [vmName] [driveLetter]" -ForegroundColor Yellow
+            Write-Host "  ls [vm]               List persistent volumes"
+            Write-Host "  create <vm>           Create the VHDX file"
+            Write-Host "  destroy <vm>          Delete the VHDX (irreversible)"
+            Write-Host "  localmount <vm> [P]   Mount on host at drive letter (default P:)"
+            Write-Host "  localunmount <vm>     Dismount from host"
+            Write-Host "  health [vm]           Detailed health check"
+        }
+    }
+}
+
+function Invoke-StorageCommand {
+    param([string]$Type, [string]$SubCmd, [string]$Name, [string]$Extra)
+
+    switch ($Type.ToLower()) {
+        'shared' { Invoke-SharedStorageCommand $SubCmd $Name $Extra }
+        'pv'     { Invoke-PVCommand $SubCmd $Name $Extra }
+        default  { Invoke-SharedStorageCommand $Type $SubCmd $Name }  # backward compat: type IS the subcmd
     }
 }
 
@@ -1894,8 +2096,13 @@ switch ($Command) {
 
     "storage" {
         Assert-Admin
-        # $VmName=subcommand  $ExecCommand=storageName  $StorageName=destPath
-        Invoke-StorageCommand $VmName $ExecCommand $StorageName
+        # storage [shared|pv] <subcmd> [name] [extra]
+        # Backward compat: storage <subcmd> [name] [dest] maps to "shared"
+        if ($VmName -in @('shared', 'pv')) {
+            Invoke-StorageCommand -Type $VmName -SubCmd $ExecCommand -Name $StorageName -Extra $ExtraArg
+        } else {
+            Invoke-StorageCommand -Type $VmName -SubCmd $ExecCommand -Name $StorageName -Extra $ExtraArg
+        }
     }
 
     "localmount" {
