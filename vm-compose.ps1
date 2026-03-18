@@ -125,7 +125,7 @@ $CommandHelp = @{
     "metrics"  = "metrics [install|start|stop|restart|status|remove]`n  Manage the vm-metrics Prometheus exporter. Default: status.`n  install: run vm-metrics-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-metrics-install.ps1"
     "web"      = "web [install|start|stop|restart|status|remove]`n  Manage the vm-dashboard web UI. Default: status.`n  install: run vm-dashboard-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-dashboard-install.ps1  |  Run directly: ./vm-dashboard.ps1"
     "note"     = "note <show|add|edit> <vm>`n  show: Print the VM's Notes field.`n  add:  Prompt for text and append it to the Notes field.`n  edit: Open the Notes field in Notepad for full editing."
-    "getlog"   = "getlog bootstrap <vm>`n  Stream the bootstrap.log from inside a VM (C:\Setup\bootstrap.log)."
+    "getlog"   = "getlog <vm>`n  List logs available inside a VM and whether they exist.`n  getlog <logtype> <vm>  Fetch a specific log.`n  Log types: bootstrap, setup, setuperr, docker"
     "help"     = "help [<command>]`n  Show help. Run 'help <command>' for details on a specific command."
 }
 
@@ -1621,17 +1621,61 @@ switch ($Command) {
     }
 
     "getlog" {
-        $logType = $VmName      # position 1
-        $vmTarget = $ExecCommand # position 2
-        $knownLogs = @{ bootstrap = 'C:\Setup\bootstrap.log' }
-        if (-not $logType -or -not $vmTarget) {
-            Write-Host "Usage: ./vm-compose.ps1 getlog bootstrap <vmName>" -ForegroundColor Yellow
-            Write-Host "  Known log types: $($knownLogs.Keys -join ', ')" -ForegroundColor Gray
-        } elseif (-not $knownLogs.ContainsKey($logType.ToLower())) {
+        # Ordered list of [type, path, description]
+        # Use $null path for logs pulled via cmdlet rather than Get-Content
+        $knownLogs = [ordered]@{
+            bootstrap = @{ Path = 'C:\Setup\bootstrap.log';                    Desc = 'Unattend bootstrap script output' }
+            setup     = @{ Path = 'C:\Windows\Panther\setupact.log';           Desc = 'Windows Setup activity log' }
+            setuperr  = @{ Path = 'C:\Windows\Panther\setuperr.log';           Desc = 'Windows Setup errors' }
+            docker    = @{ Path = $null;                                        Desc = 'Docker daemon (Windows Event Log)' }
+        }
+
+        $logType  = $VmName       # position 1: log type OR vm name when listing
+        $vmTarget = $ExecCommand  # position 2: vm name when fetching
+
+        # "getlog <vm>" with no log type → list available logs
+        if ($logType -and -not $vmTarget -and -not $knownLogs.Contains($logType.ToLower())) {
+            $vmTarget = $logType; $logType = $null
+        }
+
+        if (-not $vmTarget) {
+            Write-Host "Usage: ./vm-compose.ps1 getlog <vm>                 # list available logs" -ForegroundColor Yellow
+            Write-Host "       ./vm-compose.ps1 getlog <logtype> <vm>       # fetch a log" -ForegroundColor Yellow
+            Write-Host "  Log types: $($knownLogs.Keys -join ', ')" -ForegroundColor Gray
+        } elseif (-not $logType) {
+            # List mode: show each log and whether it exists on the VM
+            Write-Host "=== Logs available on $vmTarget ===" -ForegroundColor Cyan
+            $checks = Invoke-Command -VMName $vmTarget -ScriptBlock {
+                param($logs)
+                $logs.GetEnumerator() | ForEach-Object {
+                    $p = $_.Value.Path
+                    [PSCustomObject]@{
+                        Type   = $_.Key
+                        Path   = if ($p) { $p } else { '(event log)' }
+                        Exists = if ($p) { Test-Path $p } else { $true }
+                        Desc   = $_.Value.Desc
+                    }
+                }
+            } -ArgumentList $knownLogs -ErrorAction SilentlyContinue
+            if ($checks) {
+                $checks | ForEach-Object {
+                    $mark = if ($_.Exists) { '[+]' } else { '[ ]' }
+                    $color = if ($_.Exists) { 'Green' } else { 'DarkGray' }
+                    Write-Host ("{0} {1,-12} {2,-40} {3}" -f $mark, $_.Type, $_.Path, $_.Desc) -ForegroundColor $color
+                }
+            } else {
+                Write-Host "Could not connect to VM '$vmTarget'." -ForegroundColor Red
+            }
+        } elseif (-not $knownLogs.Contains($logType.ToLower())) {
             Write-Host "Unknown log type '$logType'. Known: $($knownLogs.Keys -join ', ')" -ForegroundColor Red
         } else {
-            $path = $knownLogs[$logType.ToLower()]
-            Invoke-VMCommand $vmTarget "if (Test-Path '$path') { Get-Content '$path' } else { Write-Host 'Log not found: $path' -ForegroundColor Yellow }"
+            $entry = $knownLogs[$logType.ToLower()]
+            if ($entry.Path) {
+                Invoke-VMCommand $vmTarget "if (Test-Path '$($entry.Path)') { Get-Content '$($entry.Path)' } else { Write-Host 'Log not found: $($entry.Path)' -ForegroundColor Yellow }"
+            } else {
+                # docker → Windows Event Log
+                Invoke-VMCommand $vmTarget "Get-EventLog -LogName Application -Source docker -Newest 100 -ErrorAction SilentlyContinue | Format-Table TimeGenerated,EntryType,Message -AutoSize -Wrap"
+            }
         }
     }
 
