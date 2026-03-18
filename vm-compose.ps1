@@ -247,6 +247,12 @@ $vms = $stack.vms.Keys
 # Allow vmstack.yaml to override the VmRoot storage path
 if ($stack.vm_root) { $VmRoot = $stack.vm_root }
 
+function Resolve-StoragePath {
+    param([string]$path)
+    if ([System.IO.Path]::IsPathRooted($path)) { return $path }
+    return Join-Path $VmRoot $path
+}
+
 function Resolve-VMSwitch {
     param($name, $cfg)
     $switchName = $cfg.switch_name
@@ -664,7 +670,7 @@ Stop-Transcript | Out-Null
                 Write-Host "WARNING: Storage '$storageName' not found in storage: section" -ForegroundColor Yellow
                 continue
             }
-            $storagePath = $storageCfg.path
+            $storagePath = Resolve-StoragePath $storageCfg.path
             Invoke-IfLive "Create shared VHDX $storagePath ($($storageCfg.size_gb) GB) if missing" {
                 if (-not (Test-Path $storagePath)) {
                     New-Item -ItemType Directory -Path (Split-Path $storagePath) -Force | Out-Null
@@ -1041,7 +1047,7 @@ function Mount-VMStorage {
     }
 
     $storageCfg = $stack.storage[$storageName]
-    $storagePath = $storageCfg.path
+    $storagePath = Resolve-StoragePath $storageCfg.path
 
     Invoke-IfLive "Create VHDX $storagePath if missing ($($storageCfg.size_gb) GB)" {
         if (-not (Test-Path $storagePath)) {
@@ -1067,7 +1073,7 @@ function Dismount-VMStorage {
         return
     }
 
-    $storagePath = $stack.storage[$storageName].path
+    $storagePath = Resolve-StoragePath $stack.storage[$storageName].path
     $drive = Get-VMHardDiskDrive -VMName $vmName | Where-Object Path -eq $storagePath
 
     if (-not $drive) {
