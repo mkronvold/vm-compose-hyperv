@@ -175,7 +175,26 @@ function Invoke-IfLive {
     }
 }
 
-# Write a COM IStream (returned by IMAPI2FS) to a file.
+# Inject keypresses into a VM console to dismiss "Press any key to boot from CD/DVD".
+# Starts immediately and sends Enter every 500ms for 15 seconds (covers the 5s prompt window).
+function Send-DVDBootKeypress {
+    param([string]$VMName)
+    Write-Host "Auto-pressing DVD boot key..." -ForegroundColor Gray
+    $expiry = (Get-Date).AddSeconds(15)
+    try {
+        $vmCim = Get-CimInstance -Namespace 'root/virtualization/v2' -ClassName 'Msvm_ComputerSystem' -Filter "ElementName='$VMName'" -ErrorAction Stop
+        $kbd   = Get-CimAssociatedInstance -InputObject $vmCim -ResultClassName 'Msvm_Keyboard' -ErrorAction Stop
+        while ((Get-Date) -lt $expiry) {
+            Invoke-CimMethod -InputObject $kbd -MethodName 'TypeKey' -Arguments @{ keyCode = 13 } | Out-Null
+            Start-Sleep -Milliseconds 500
+        }
+        Write-Host "DVD boot key sent." -ForegroundColor Green
+    } catch {
+        Write-Host "Note: Could not auto-press DVD boot key ($($_.Exception.Message)). Press Enter in VM console if setup doesn't start." -ForegroundColor Yellow
+    }
+}
+
+
 # ADODB.Stream.CopyFrom doesn't accept IStream; this C# shim reads it correctly.
 if (-not ([System.Management.Automation.PSTypeName]'IsoHelper').Type) {
     Add-Type -TypeDefinition @'
@@ -297,6 +316,7 @@ function Build-VM {
             } else {
                 Write-Host "VM '$vmName' already exists (state: $($existingVm.State)). Starting..." -ForegroundColor Yellow
                 Invoke-IfLive "Start-VM $vmName" { Start-VM -Name $vmName }
+                Send-DVDBootKeypress -VMName $vmName
             }
             return
         }
@@ -652,21 +672,7 @@ $dismConversionBlock
 
     if ($AutoStart) {
         Invoke-IfLive "Start-VM $vmName" { Start-VM $vmName }
-        # Auto-press Enter to pass "Press any key to boot from CD/DVD" prompt
-        Write-Host "Waiting for DVD boot prompt..." -ForegroundColor Gray
-        Start-Sleep -Seconds 6
-        try {
-            $vmCim = Get-CimInstance -Namespace 'root/virtualization/v2' -ClassName 'Msvm_ComputerSystem' -Filter "ElementName='$vmName'" -ErrorAction Stop
-            $kbd   = Get-CimAssociatedInstance -InputObject $vmCim -ResultClassName 'Msvm_Keyboard' -ErrorAction Stop
-            # Send a few keypresses to cover the timing window
-            1..4 | ForEach-Object {
-                Invoke-CimMethod -InputObject $kbd -MethodName 'TypeKey' -Arguments @{ keyCode = 13 } | Out-Null
-                Start-Sleep -Milliseconds 500
-            }
-            Write-Host "Sent keypress — unattended install should begin." -ForegroundColor Green
-        } catch {
-            Write-Host "Note: Could not auto-press DVD boot key. Open VM console and press Enter if setup doesn't start." -ForegroundColor Yellow
-        }
+        Send-DVDBootKeypress -VMName $vmName
         Write-Host "VM '$vmName' started and installing automatically."
     } else {
         Write-Host "VM '$vmName' built. Run 'up' to start it." -ForegroundColor Cyan
