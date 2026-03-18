@@ -119,7 +119,7 @@ $CommandHelp = @{
     "mount"    = "mount <vm> <storageName>`n  Hot-add a shared storage VHDX (from the storage: section) to a running VM."
     "unmount"  = "unmount <vm> <storageName>`n  Remove a shared storage VHDX from a VM."
     "storage"  = "storage <ls|rm|mv> [args]`n  Manage shared storage VHDXes.`n  ls / list              List all volumes (path, size, % allocated, mount status)`n  rm / remove <name>     Delete a VHDX (must be unmounted)`n  mv / move <name> <dst> Move a VHDX to a new path (must be unmounted; update vmstack.yaml path after)"
-    "localmount"   = "localmount <storageName> [driveLetter]`n  Mount a shared storage VHDX to a host drive letter (default S:).`n  Allows direct file access like a Docker volume.`n  WARNING: do not use the same drive simultaneously from a VM — risk of data corruption."
+    "localmount"   = "localmount <storageName> [driveLetter]`n  Mount a shared storage VHDX to a host drive letter (default S:).`n  Allows direct file access like a Docker volume.`n  Local mount and VM use are mutually exclusive."
     "localunmount" = "localunmount <storageName>`n  Dismount a shared storage VHDX from the host drive."
     "cp"       = "cp / copy <source> <destination>`n  Copy files between host and a running VM.`n  Host to VM:  cp C:\local\file.txt  myvm:C:\dest\`n  VM to host:  cp myvm:C:\path\file.txt  .`n  Prefix VM paths with vmname: (colon). VM-to-host prompts for Administrator credentials."
     "metrics"  = "metrics [install|start|stop|restart|status|remove]`n  Manage the vm-metrics Prometheus exporter. Default: status.`n  install: run vm-metrics-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-metrics-install.ps1"
@@ -280,6 +280,56 @@ function Initialize-SharedVHDX {
     }
 }
 
+function Test-StorageMountedOnHost {
+    param([string]$StoragePath)
+
+    $vhd = Get-VHD -Path $StoragePath -ErrorAction SilentlyContinue
+    return ($vhd -and $vhd.Attached -and $null -ne $vhd.DiskNumber -and $vhd.DiskNumber -ge 0)
+}
+
+function Get-StorageMountedVMNames {
+    param([string]$StoragePath)
+
+    return @(
+        Get-VM -ErrorAction SilentlyContinue |
+            Where-Object {
+                (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue |
+                    Where-Object Path -eq $StoragePath)
+            } |
+            Select-Object -ExpandProperty Name
+    )
+}
+
+function Get-VMStorageHostConflicts {
+    param($cfg)
+
+    $conflicts = @()
+    if (-not $cfg.mount -or -not $stack.storage) { return $conflicts }
+
+    foreach ($storageName in $cfg.mount) {
+        if (-not $stack.storage[$storageName]) { continue }
+        $storagePath = Resolve-StoragePath $stack.storage[$storageName].path
+        if (Test-StorageMountedOnHost $storagePath) {
+            $conflicts += [pscustomobject]@{
+                Name = $storageName
+                Path = $storagePath
+            }
+        }
+    }
+
+    return $conflicts
+}
+
+function Write-StorageHostConflict {
+    param([string]$VmName, [array]$Conflicts)
+
+    Write-Host "ERROR: Cannot use shared storage for VM '$VmName' while it is mounted on the host." -ForegroundColor Red
+    foreach ($conflict in $Conflicts) {
+        Write-Host "  $($conflict.Name): $($conflict.Path)" -ForegroundColor Yellow
+    }
+    Write-Host "  Run './vm-compose.ps1 localunmount <storageName>' first." -ForegroundColor Gray
+}
+
 function Resolve-VMSwitch {
     param($name, $cfg)
     $switchName = $cfg.switch_name
@@ -312,6 +362,12 @@ function Build-VM {
 
     Write-Host ""
     Write-Host "=== Building VM: $vmName ==="
+
+    $storageConflicts = Get-VMStorageHostConflicts $cfg
+    if ($storageConflicts.Count -gt 0) {
+        Write-StorageHostConflict -VmName $vmName -Conflicts $storageConflicts
+        return
+    }
 
     # If the VM already exists, handle rebuild or start logic
     $existingVm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
@@ -1095,6 +1151,11 @@ function Mount-VMStorage {
 
     $storageCfg = $stack.storage[$storageName]
     $storagePath = Resolve-StoragePath $storageCfg.path
+    if (Test-StorageMountedOnHost $storagePath) {
+        Write-Host "Storage '$storageName' is currently mounted on the host. Local mount and VM use are mutually exclusive." -ForegroundColor Red
+        Write-Host "  Run './vm-compose.ps1 localunmount $storageName' first." -ForegroundColor Gray
+        return
+    }
 
     Invoke-IfLive "Create VHDX $storagePath if missing ($($storageCfg.size_gb) GB)" {
         if (-not (Test-Path $storagePath)) {
@@ -1148,13 +1209,11 @@ function Mount-LocalStorage {
 
     $letter = $DriveLetter.TrimEnd(':').ToUpper()
 
-    # Warn if any VM has it mounted (concurrent access risks data corruption)
-    $mounted = Get-VM -ErrorAction SilentlyContinue |
-        Where-Object { (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue | Where-Object Path -eq $storagePath) } |
-        Select-Object -ExpandProperty Name
-    if ($mounted) {
-        Write-Host "WARNING: '$StorageName' is also mounted on VM(s): $($mounted -join ', ')" -ForegroundColor Yellow
-        Write-Host "  Concurrent host+VM access may corrupt data. Proceed with caution." -ForegroundColor Yellow
+    $mounted = Get-StorageMountedVMNames $storagePath
+    if ($mounted.Count -gt 0) {
+        Write-Host "Storage '$StorageName' is mounted on VM(s): $($mounted -join ', ')" -ForegroundColor Red
+        Write-Host "  Local mount and VM use are mutually exclusive. Unmount it from the VM first." -ForegroundColor Gray
+        return
     }
 
     # Check drive letter not already in use
