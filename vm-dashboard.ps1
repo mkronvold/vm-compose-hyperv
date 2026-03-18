@@ -129,6 +129,12 @@ Start-PodeServer -Threads 2 {
                         }
                         $diskNum = $null; $dnStr = "$($vhd.DiskNumber)"
                         if ($vhd -and $vhd.Attached -and $dnStr -match '^\d+$') { $diskNum = [int]$dnStr }
+                        # Get-VHD throws a permission error when the disk is host-mounted (VMMS locks it).
+                        # Fall back to Get-Disk by Location to detect host mounts reliably.
+                        if ($null -eq $diskNum) {
+                            $hostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $sp }
+                            if ($hostDisk) { $diskNum = [int]$hostDisk.Number }
+                        }
                         if ($null -ne $diskNum) {
                             $dl = Get-Disk -Number $diskNum -ErrorAction SilentlyContinue |
                                   Get-Partition -ErrorAction SilentlyContinue |
