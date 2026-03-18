@@ -1170,7 +1170,8 @@ function Test-AllVMs {
             }
             if ($null -ne $checks.EvalDays) {
                 $evalColor = if ($checks.EvalDays -le 14) { 'Red' } elseif ($checks.EvalDays -le 30) { 'Yellow' } else { 'Cyan' }
-                Write-Host ("  [i] {0,-22} {1}" -f 'Eval license' "$($checks.EvalDays) days remaining") -ForegroundColor $evalColor
+                $evalMsg = "$($checks.EvalDays) days remaining"
+                Write-Host ("  [i] {0,-22} {1}" -f 'Eval license', $evalMsg) -ForegroundColor $evalColor
             }
             Write-Host "  Bootstrap: $($checks.BootstrapLast)" -ForegroundColor $(if ($checks.BootstrapLast -like '*complete*') { 'Green' } else { 'Yellow' })
 
