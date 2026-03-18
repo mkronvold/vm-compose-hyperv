@@ -682,12 +682,22 @@ Get-Disk | Where-Object { `$_.PartitionStyle -ne 'RAW' -and -not `$_.IsOffline }
     Get-Partition | Where-Object { -not `$_.DriveLetter -and `$_.Size -gt 100MB -and `$_.Type -notin @('System','Reserved','Recovery') } |
     ForEach-Object { `$_ | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue }
 
-# Write Docker daemon config (idempotent — skip if already written)
-`$dockerVolume = Get-Volume -FileSystemLabel 'DockerData' -ErrorAction SilentlyContinue
-if (`$dockerVolume -and -not (Test-Path 'C:\ProgramData\docker\config\daemon.json')) {
-    `$dockerDrive = `$dockerVolume.DriveLetter + ':'
-    New-Item -ItemType Directory -Path "`$dockerDrive\docker-data" -Force | Out-Null
-    `$daemonConfig = @{ 'data-root' = "`$dockerDrive\docker-data" }
+# Pin drive letters: DockerData (persistent) → P:, SharedData → S:
+@([PSCustomObject]@{ Label = 'DockerData'; Letter = 'P' }, [PSCustomObject]@{ Label = 'SharedData'; Letter = 'S' }) |
+ForEach-Object {
+    `$vol = Get-Volume -FileSystemLabel `$_.Label -ErrorAction SilentlyContinue
+    if (`$vol -and `$vol.DriveLetter -and `$vol.DriveLetter -ne `$_.Letter) {
+        Get-Partition -DriveLetter `$vol.DriveLetter -ErrorAction SilentlyContinue |
+            Set-Partition -NewDriveLetter `$_.Letter -ErrorAction SilentlyContinue
+        Write-Host "Assigned `$(`$_.Letter): to `$(`$_.Label)"
+    }
+}
+
+# Write Docker daemon config pointing to P:\docker-data (idempotent)
+if ((Get-Volume -FileSystemLabel 'DockerData' -ErrorAction SilentlyContinue) -and
+    -not (Test-Path 'C:\ProgramData\docker\config\daemon.json')) {
+    New-Item -ItemType Directory -Path 'P:\docker-data' -Force | Out-Null
+    `$daemonConfig = @{ 'data-root' = 'P:\docker-data' }
     New-Item -ItemType Directory -Path 'C:\ProgramData\docker\config' -Force | Out-Null
     `$daemonConfig | ConvertTo-Json | Out-File 'C:\ProgramData\docker\config\daemon.json' -Encoding utf8 -Force
 }
