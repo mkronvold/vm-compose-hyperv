@@ -127,7 +127,8 @@ Start-PodeServer -Threads 2 {
                         if ($vhd -and $vhd.Size -gt 0) {
                             $pctAlloc = '{0:0}%' -f ($vhd.FileSize / $vhd.Size * 100)
                         }
-                        $diskNum = ($vhd.DiskNumber -as [int?])
+                        $diskNum = $null; $dn = $vhd.DiskNumber
+                        if ($dn -is [uint32] -or $dn -is [int]) { $diskNum = [int]$dn }
                         if ($vhd -and $vhd.Attached -and $null -ne $diskNum -and $diskNum -ge 0) {
                             $dl = Get-Disk -Number $diskNum -ErrorAction SilentlyContinue |
                                   Get-Partition -ErrorAction SilentlyContinue |
@@ -306,7 +307,8 @@ $($_.ScriptStackTrace)</pre>
                 $rawPath = $stack.storage[$storageName].path
                 $sp = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
                 $vhd = Get-VHD -Path $sp -ErrorAction SilentlyContinue
-                if ($vhd -and $vhd.Attached -and $null -ne ($vhd.DiskNumber -as [int?]) -and ($vhd.DiskNumber -as [int?]) -ge 0) {
+                $dn = $vhd.DiskNumber
+                if ($vhd -and $vhd.Attached -and ($dn -is [uint32] -or $dn -is [int]) -and [int]$dn -ge 0) {
                     $hasHostMountedConflict = $true
                     break
                 }
@@ -340,7 +342,8 @@ $($_.ScriptStackTrace)</pre>
                 $rawPath = $stack.storage[$storageName].path
                 $sp = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
                 $vhd = Get-VHD -Path $sp -ErrorAction SilentlyContinue
-                if ($vhd -and $vhd.Attached -and $null -ne ($vhd.DiskNumber -as [int?]) -and ($vhd.DiskNumber -as [int?]) -ge 0) {
+                $dn = $vhd.DiskNumber
+                if ($vhd -and $vhd.Attached -and ($dn -is [uint32] -or $dn -is [int]) -and [int]$dn -ge 0) {
                     $hasHostMountedConflict = $true
                     break
                 }
