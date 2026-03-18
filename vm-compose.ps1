@@ -1195,6 +1195,7 @@ function Invoke-StorageCommand {
 }
 
 
+function Invoke-VMCopy {
     param(
         [string]$Source,
         [string]$Destination
