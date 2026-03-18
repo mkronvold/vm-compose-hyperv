@@ -32,7 +32,7 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","start","build","down","stop","restart","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","cp","metrics","web","note","help")]
+    [ValidateSet("up","start","build","down","stop","restart","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","cp","copy","metrics","web","note","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -77,7 +77,7 @@ COMMANDS
   version         Show version info
   mount <vm> <storage>    Hot-add a shared storage disk to a VM
   unmount <vm> <storage>  Remove a shared storage disk from a VM
-  cp <src> <dest>         Copy files to/from a VM  (prefix VM paths: vmname:path)
+  cp / copy <src> <dest>  Copy files to/from a VM  (prefix VM paths: vmname:path)
   note <show|add|edit> <vm>  Show, append to, or edit VM notes
 
 SERVICES
@@ -113,7 +113,7 @@ $CommandHelp = @{
     "version"  = "version`n  Print version, PowerShell version, and active config file path."
     "mount"    = "mount <vm> <storageName>`n  Hot-add a shared storage VHDX (from the storage: section) to a running VM."
     "unmount"  = "unmount <vm> <storageName>`n  Remove a shared storage VHDX from a VM."
-    "cp"       = "cp <source> <destination>`n  Copy files between host and a running VM.`n  Host to VM:  cp C:\local\file.txt  myvm:C:\dest\`n  VM to host:  cp myvm:C:\path\file.txt  .`n  Prefix VM paths with vmname: (colon). VM-to-host prompts for Administrator credentials."
+    "cp"       = "cp / copy <source> <destination>`n  Copy files between host and a running VM.`n  Host to VM:  cp C:\local\file.txt  myvm:C:\dest\`n  VM to host:  cp myvm:C:\path\file.txt  .`n  Prefix VM paths with vmname: (colon). VM-to-host prompts for Administrator credentials."
     "metrics"  = "metrics [install|start|stop|status|remove]`n  Manage the vm-metrics Prometheus exporter. Default: status.`n  install: run vm-metrics-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-metrics-install.ps1"
     "web"      = "web [install|start|stop|status|remove]`n  Manage the vm-dashboard web UI. Default: status.`n  install: run vm-dashboard-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-dashboard-install.ps1  |  Run directly: ./vm-dashboard.ps1"
     "note"     = "note <show|add|edit> <vm>`n  show: Print the VM's Notes field.`n  add:  Prompt for text and append it to the Notes field.`n  edit: Open the Notes field in Notepad for full editing."
@@ -1385,7 +1385,7 @@ switch ($Command) {
         }
     }
 
-    "cp" {
+    { $_ -in "cp","copy" } {
         # $VmName = source, $ExecCommand = destination (positional params 1 and 2)
         if (-not $VmName -or -not $ExecCommand) {
             Write-Host "Usage: ./vm-compose.ps1 cp <source> <destination>" -ForegroundColor Yellow
