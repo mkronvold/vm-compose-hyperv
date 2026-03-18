@@ -261,6 +261,25 @@ function Resolve-StoragePath {
     return Join-Path $VmRoot $path
 }
 
+function Initialize-SharedVHDX {
+    param([string]$Path, [string]$Label = 'SharedData')
+    Write-Host "  Initializing new VHDX with GPT + NTFS ($Label)..."
+    try {
+        $vhd = Mount-VHD -Path $Path -PassThru -ErrorAction Stop
+        $diskNum = $vhd.DiskNumber
+        Set-Disk -Number $diskNum -IsOffline $false -ErrorAction SilentlyContinue
+        Set-Disk -Number $diskNum -IsReadOnly $false -ErrorAction SilentlyContinue
+        Initialize-Disk -Number $diskNum -PartitionStyle GPT -PassThru -ErrorAction Stop |
+            New-Partition -UseMaximumSize |
+            Format-Volume -FileSystem NTFS -NewFileSystemLabel $Label -Confirm:$false -ErrorAction Stop | Out-Null
+        Write-Host "  VHDX initialized." -ForegroundColor Green
+    } catch {
+        Write-Host "  WARNING: Could not initialize VHDX: $_" -ForegroundColor Yellow
+    } finally {
+        Dismount-VHD -Path $Path -ErrorAction SilentlyContinue
+    }
+}
+
 function Resolve-VMSwitch {
     param($name, $cfg)
     $switchName = $cfg.switch_name
@@ -683,6 +702,7 @@ Stop-Transcript | Out-Null
                 if (-not (Test-Path $storagePath)) {
                     New-Item -ItemType Directory -Path (Split-Path $storagePath) -Force | Out-Null
                     New-VHD -Path $storagePath -SizeBytes ($storageCfg.size_gb * 1GB) -Dynamic | Out-Null
+                    Initialize-SharedVHDX -Path $storagePath -Label $storageName
                 }
             }
             Invoke-IfLive "Add-VMHardDiskDrive $vmName <- $storagePath" {
@@ -1061,6 +1081,7 @@ function Mount-VMStorage {
         if (-not (Test-Path $storagePath)) {
             New-Item -ItemType Directory -Path (Split-Path $storagePath) -Force | Out-Null
             New-VHD -Path $storagePath -SizeBytes ($storageCfg.size_gb * 1GB) -Dynamic | Out-Null
+            Initialize-SharedVHDX -Path $storagePath -Label $storageName
         }
     }
     Invoke-IfLive "Add-VMHardDiskDrive $vmName <- $storagePath" {
@@ -1256,11 +1277,30 @@ function Invoke-StorageCommand {
             Write-Host "  Update path: in $ConfigFile" -ForegroundColor Yellow
         }
 
+        '^(init|initialize)$' {
+            $storageName = $SubArgs[0]
+            if (-not $storageName -or -not $stack.storage -or -not $stack.storage[$storageName]) {
+                Write-Host "Usage: ./vm-compose.ps1 storage init <name>" -ForegroundColor Yellow; return
+            }
+            $storagePath = Resolve-StoragePath $stack.storage[$storageName].path
+            if (-not (Test-Path $storagePath)) {
+                Write-Host "VHDX not found: $storagePath" -ForegroundColor Red; return
+            }
+            $vmsMounted = @(Get-VM | Where-Object {
+                (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue).Path -contains $storagePath
+            })
+            if ($vmsMounted.Count -gt 0) {
+                Write-Host "Cannot init while mounted on VM(s): $($vmsMounted.Name -join ', ')" -ForegroundColor Red; return
+            }
+            Initialize-SharedVHDX -Path $storagePath -Label $storageName
+        }
+
         default {
-            Write-Host "Usage: ./vm-compose.ps1 storage <ls|rm|mv> [storageName] [destPath]" -ForegroundColor Yellow
+            Write-Host "Usage: ./vm-compose.ps1 storage <ls|rm|mv|init> [storageName] [destPath]" -ForegroundColor Yellow
             Write-Host "  ls / list              List all shared storage volumes"
             Write-Host "  rm / remove <name>     Delete a storage VHDX (must be unmounted)"
             Write-Host "  mv / move <name> <dst> Move a storage VHDX (must be unmounted)"
+            Write-Host "  init <name>            Initialize a new/blank VHDX with GPT+NTFS"
         }
     }
 }
