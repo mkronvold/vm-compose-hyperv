@@ -325,8 +325,30 @@ $($_.ScriptStackTrace)</pre>
     }
 
     Add-PodeRoute -Method Post -Path "/vm/:name/restart" -ScriptBlock {
-        $vmName = $WebEvent.Parameters['name']
-        if (Get-VM -Name $vmName -ErrorAction SilentlyContinue) { Restart-VM -Name $vmName -Force -ErrorAction SilentlyContinue }
+        try {
+            Import-Module powershell-yaml -ErrorAction Stop
+            $vmName = $WebEvent.Parameters['name']
+            $cfgFile = Get-PodeState -Name 'ConfigFile'
+            $stack = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
+            $vmCfg = $stack.vms[$vmName]
+            $vmRoot = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
+
+            $hasHostMountedConflict = $false
+            foreach ($storageName in @($vmCfg.mount)) {
+                if (-not $stack.storage[$storageName]) { continue }
+                $rawPath = $stack.storage[$storageName].path
+                $sp = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
+                $vhd = Get-VHD -Path $sp -ErrorAction SilentlyContinue
+                if ($vhd -and $vhd.Attached -and $null -ne $vhd.DiskNumber -and $vhd.DiskNumber -ge 0) {
+                    $hasHostMountedConflict = $true
+                    break
+                }
+            }
+
+            if (-not $hasHostMountedConflict -and (Get-VM -Name $vmName -ErrorAction SilentlyContinue)) {
+                Restart-VM -Name $vmName -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }
         Move-PodeResponseUrl -Url "/"
     }
 

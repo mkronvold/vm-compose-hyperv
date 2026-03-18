@@ -835,6 +835,12 @@ function Restart-AllVMs {
     param([string]$Target)
     foreach ($vm in (Resolve-TargetVMs $Target)) {
         if (Get-VM -Name $vm -ErrorAction SilentlyContinue) {
+            $cfg = $stack.vms[$vm]
+            $conflicts = Get-VMStorageHostConflicts $cfg
+            if ($conflicts.Count -gt 0) {
+                Write-StorageHostConflict -VmName $vm -Conflicts $conflicts
+                continue
+            }
             Invoke-IfLive "Restart-VM $vm" {
                 Restart-VM -Name $vm -Force
             }
