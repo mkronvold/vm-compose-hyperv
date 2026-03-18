@@ -63,6 +63,8 @@ function Get-PrometheusMetrics {
     $lines += "# TYPE hyperv_vm_ip_assigned gauge"
     $lines += "# HELP hyperv_vm_docker_running Whether Docker is running inside the VM (1=yes, 0=no)"
     $lines += "# TYPE hyperv_vm_docker_running gauge"
+    $lines += "# HELP hyperv_vm_eval_days_remaining Days remaining on Windows evaluation license (-1 if fully licensed or unknown)"
+    $lines += "# TYPE hyperv_vm_eval_days_remaining gauge"
 
     foreach ($vmName in $vmNames) {
         $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
@@ -75,6 +77,7 @@ function Get-PrometheusMetrics {
             $lines += "hyperv_vm_uptime_seconds{vm=`"$vmName`"} 0"
             $lines += "hyperv_vm_ip_assigned{vm=`"$vmName`"} 0"
             $lines += "hyperv_vm_docker_running{vm=`"$vmName`"} 0"
+            $lines += "hyperv_vm_eval_days_remaining{vm=`"$vmName`"} -1"
             continue
         }
 
@@ -91,13 +94,23 @@ function Get-PrometheusMetrics {
         $ipAssigned = if ($ip) { 1 } else { 0 }
 
         $dockerRunning = 0
+        $evalDays = -1
         if ($isRunning) {
             try {
                 $result = Invoke-Command -VMName $vmName -ScriptBlock {
-                    (Get-Service docker -ErrorAction SilentlyContinue).Status -eq 'Running'
+                    $docker = (Get-Service docker -ErrorAction SilentlyContinue).Status -eq 'Running'
+                    $slp = Get-WmiObject -Class SoftwareLicensingProduct -ErrorAction SilentlyContinue |
+                        Where-Object { $_.ApplicationID -eq '55c92734-d682-4d71-983e-d6ec3f16059f' -and
+                                       $_.PartialProductKey -and $_.GracePeriodRemaining -gt 0 } |
+                        Select-Object -First 1
+                    [PSCustomObject]@{
+                        Docker   = $docker
+                        EvalMins = if ($slp) { $slp.GracePeriodRemaining } else { -1 }
+                    }
                 } -ErrorAction Stop
-                $dockerRunning = if ($result) { 1 } else { 0 }
-            } catch { $dockerRunning = 0 }
+                $dockerRunning = if ($result.Docker) { 1 } else { 0 }
+                $evalDays = if ($result.EvalMins -ge 0) { [math]::Floor($result.EvalMins / 1440) } else { -1 }
+            } catch { $dockerRunning = 0; $evalDays = -1 }
         }
 
         $lines += "hyperv_vm_exists{vm=`"$vmName`"} 1"
@@ -108,6 +121,7 @@ function Get-PrometheusMetrics {
         $lines += "hyperv_vm_uptime_seconds{vm=`"$vmName`"} $uptimeSec"
         $lines += "hyperv_vm_ip_assigned{vm=`"$vmName`"} $ipAssigned"
         $lines += "hyperv_vm_docker_running{vm=`"$vmName`"} $dockerRunning"
+        $lines += "hyperv_vm_eval_days_remaining{vm=`"$vmName`"} $evalDays"
     }
 
     return $lines -join "`n"
