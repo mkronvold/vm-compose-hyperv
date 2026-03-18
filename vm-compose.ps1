@@ -769,8 +769,11 @@ Stop-Transcript | Out-Null
     # Create persistent disk
     # -------------------------
     Invoke-IfLive "New-VHD persistent disk $PersistentVhdPath ($($cfg.persistent_disk_gb) GB)" {
-        if (Test-Path $PersistentVhdPath) { Remove-Item $PersistentVhdPath -Force }
-        New-VHD -Path $PersistentVhdPath -SizeBytes ($cfg.persistent_disk_gb * 1GB) -Dynamic | Out-Null
+        if (-not (Test-Path $PersistentVhdPath)) {
+            New-VHD -Path $PersistentVhdPath -SizeBytes ($cfg.persistent_disk_gb * 1GB) -Dynamic | Out-Null
+        } else {
+            Write-Host "Persistent disk already exists — preserving data ($PersistentVhdPath)"
+        }
     }
 
     # -------------------------
