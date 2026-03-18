@@ -22,9 +22,9 @@ storage:
 vms:
   winhost1:
     iso: "C:/ISOs/SERVER_EVAL_x64FRE_en-us.iso"
-    # key: "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"   # optional product key; omit for eval ISO (180-day trial)
-    # keytype: "Windows Server 2022 Standard"  # informational
-    # keynotes: "use dism to convert from eval to retail"  # informational
+    # product_key: "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"   # optional: activate + convert from Eval ISO to full edition
+    # product_type: "WINDOWS SERVER 2022 STANDARD"    # required with product_key; used by DISM to set edition
+    # product_notes: "use dism to convert from eval to retail"  # informational only
     # admin_password: "YourPassword123"        # optional; if omitted a random 20-char password is generated and printed once
     memory_gb: 8
     cpus: 4
