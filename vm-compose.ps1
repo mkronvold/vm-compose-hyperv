@@ -32,7 +32,7 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","storage","localmount","localunmount","cp","copy","metrics","web","dashboard","note","help")]
+    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","storage","localmount","localunmount","cp","copy","metrics","web","dashboard","getlog","note","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -125,6 +125,7 @@ $CommandHelp = @{
     "metrics"  = "metrics [install|start|stop|restart|status|remove]`n  Manage the vm-metrics Prometheus exporter. Default: status.`n  install: run vm-metrics-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-metrics-install.ps1"
     "web"      = "web [install|start|stop|restart|status|remove]`n  Manage the vm-dashboard web UI. Default: status.`n  install: run vm-dashboard-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-dashboard-install.ps1  |  Run directly: ./vm-dashboard.ps1"
     "note"     = "note <show|add|edit> <vm>`n  show: Print the VM's Notes field.`n  add:  Prompt for text and append it to the Notes field.`n  edit: Open the Notes field in Notepad for full editing."
+    "getlog"   = "getlog bootstrap <vm>`n  Stream the bootstrap.log from inside a VM (C:\Setup\bootstrap.log)."
     "help"     = "help [<command>]`n  Show help. Run 'help <command>' for details on a specific command."
 }
 
@@ -1616,6 +1617,21 @@ switch ($Command) {
             Write-Host "Usage: ./vm-compose.ps1 logs <vmName>" -ForegroundColor Yellow
         } else {
             Get-VMLogs $VmName
+        }
+    }
+
+    "getlog" {
+        $logType = $VmName      # position 1
+        $vmTarget = $ExecCommand # position 2
+        $knownLogs = @{ bootstrap = 'C:\Setup\bootstrap.log' }
+        if (-not $logType -or -not $vmTarget) {
+            Write-Host "Usage: ./vm-compose.ps1 getlog bootstrap <vmName>" -ForegroundColor Yellow
+            Write-Host "  Known log types: $($knownLogs.Keys -join ', ')" -ForegroundColor Gray
+        } elseif (-not $knownLogs.ContainsKey($logType.ToLower())) {
+            Write-Host "Unknown log type '$logType'. Known: $($knownLogs.Keys -join ', ')" -ForegroundColor Red
+        } else {
+            $path = $knownLogs[$logType.ToLower()]
+            Invoke-VMCommand $vmTarget "if (Test-Path '$path') { Get-Content '$path' } else { Write-Host 'Log not found: $path' -ForegroundColor Yellow }"
         }
     }
 
