@@ -661,24 +661,24 @@ Write-Host "Bootstrap started: `$(Get-Date)"
 Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
 
 # Initialize persistent storage disk
-\$rawDisks = Get-Disk | Where-Object PartitionStyle -eq 'RAW'
-if (\$rawDisks.Count -ge 1) {
-    \$disk = \$rawDisks[0]
-    Initialize-Disk -Number \$disk.Number -PartitionStyle GPT -PassThru |
+`$rawDisks = Get-Disk | Where-Object PartitionStyle -eq 'RAW'
+if (`$rawDisks.Count -ge 1) {
+    `$disk = `$rawDisks[0]
+    Initialize-Disk -Number `$disk.Number -PartitionStyle GPT -PassThru |
         New-Partition -UseMaximumSize -AssignDriveLetter |
-        Format-Volume -FileSystem NTFS -NewFileSystemLabel 'DockerData' -Confirm:\$false
+        Format-Volume -FileSystem NTFS -NewFileSystemLabel 'DockerData' -Confirm:`$false
 }
 
 # Get DockerData volume drive letter
-\$dockerVolume = Get-Volume -FileSystemLabel 'DockerData' -ErrorAction SilentlyContinue
-if (\$dockerVolume) {
-    \$dockerDrive = \$dockerVolume.DriveLetter + ':'
-    New-Item -ItemType Directory -Path "\$dockerDrive\docker-data" -Force | Out-Null
+`$dockerVolume = Get-Volume -FileSystemLabel 'DockerData' -ErrorAction SilentlyContinue
+if (`$dockerVolume) {
+    `$dockerDrive = `$dockerVolume.DriveLetter + ':'
+    New-Item -ItemType Directory -Path "`$dockerDrive\docker-data" -Force | Out-Null
 
     # Configure Docker daemon
-    \$daemonConfig = @{ 'data-root' = "\$dockerDrive\docker-data" }
+    `$daemonConfig = @{ 'data-root' = "`$dockerDrive\docker-data" }
     New-Item -ItemType Directory -Path 'C:\ProgramData\docker\config' -Force | Out-Null
-    \$daemonConfig | ConvertTo-Json | Out-File 'C:\ProgramData\docker\config\daemon.json' -Encoding utf8 -Force
+    `$daemonConfig | ConvertTo-Json | Out-File 'C:\ProgramData\docker\config\daemon.json' -Encoding utf8 -Force
 }
 
 Install-WindowsFeature -Name Containers -IncludeAllSubFeature -IncludeManagementTools
