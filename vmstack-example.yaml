@@ -3,11 +3,14 @@ version: "1"
 # vm_root: "C:\HyperV\VMs"   # optional: override default VM storage root (default: C:\HyperV\VMs)
 
 networks:
+  # Each network entry maps a logical name to an existing Hyper-V Virtual Switch.
+  # The switch must already exist — vm-compose does NOT create switches.
+  # Use "Default Switch" for automatic NAT + DHCP (built into Windows 10/11/Server).
   natnet:
-    type: nat
-    switch_name: "hv-nat"
-    subnet: "192.168.200.0/24"
-    gateway: "192.168.200.1"
+    switch_name: "Default Switch"
+  # Example custom switch:
+  # corpnet:
+  #   switch_name: "External-Corp"
 
 storage:
   shareddata:

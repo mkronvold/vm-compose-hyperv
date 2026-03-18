@@ -245,58 +245,29 @@ $vms = $stack.vms.Keys
 # Allow vmstack.yaml to override the VmRoot storage path
 if ($stack.vm_root) { $VmRoot = $stack.vm_root }
 
-function Initialize-Network {
+function Resolve-VMSwitch {
     param($name, $cfg)
-
     $switchName = $cfg.switch_name
-
+    if (-not $switchName) {
+        Write-Host "WARNING: Network '$name' has no switch_name — using 'Default Switch'" -ForegroundColor Yellow
+        return "Default Switch"
+    }
     if (Get-VMSwitch -Name $switchName -ErrorAction SilentlyContinue) {
-        Write-Host "Network '$name' already exists as switch '$switchName'"
-        return
+        return $switchName
     }
-
-    switch ($cfg.type) {
-
-        "internal" {
-            Write-Host "Creating INTERNAL switch '$switchName'"
-            Invoke-IfLive "New-VMSwitch -Name $switchName -SwitchType Internal" {
-                New-VMSwitch -Name $switchName -SwitchType Internal | Out-Null
-            }
-        }
-
-        "external" {
-            Write-Host "Creating EXTERNAL switch '$switchName'"
-            $nic = Get-NetAdapter | Where-Object Status -eq "Up" | Select-Object -First 1
-            Invoke-IfLive "New-VMSwitch -Name $switchName -NetAdapterName $($nic.Name)" {
-                New-VMSwitch -Name $switchName -NetAdapterName $nic.Name -AllowManagementOS $true | Out-Null
-            }
-        }
-
-        "nat" {
-            Write-Host "Creating NAT switch '$switchName'"
-            Invoke-IfLive "New-VMSwitch $switchName + New-NetIPAddress $($cfg.gateway) + New-NetNat $($cfg.subnet)" {
-                New-VMSwitch -Name $switchName -SwitchType Internal | Out-Null
-                $ifIndex = (Get-NetAdapter -Name "vEthernet ($switchName)" -ErrorAction SilentlyContinue).ifIndex
-                if (-not $ifIndex) {
-                    Write-Host "WARNING: Could not find adapter 'vEthernet ($switchName)' — skipping IP/NAT config." -ForegroundColor Yellow
-                    return
-                }
-                New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $cfg.gateway -PrefixLength 24 | Out-Null
-                New-NetNat -Name $switchName -InternalIPInterfaceAddressPrefix $cfg.subnet | Out-Null
-            }
-        }
-
-        default {
-            Write-Host "Unknown network type: $($cfg.type)" -ForegroundColor Red
-        }
-    }
+    Write-Host "WARNING: Virtual switch '$switchName' does not exist — using 'Default Switch'" -ForegroundColor Yellow
+    Write-Host "  Create it in Hyper-V Manager or with: New-VMSwitch -Name '$switchName' ..." -ForegroundColor Gray
+    return "Default Switch"
 }
 
-# Auto-create networks (called only by commands that need it)
+# Validate networks exist (called only by commands that need it)
 function Initialize-Networks {
     if ($stack.networks) {
         foreach ($net in $stack.networks.Keys) {
-            Initialize-Network $net $stack.networks[$net]
+            $switchName = $stack.networks[$net].switch_name
+            if ($switchName -and -not (Get-VMSwitch -Name $switchName -ErrorAction SilentlyContinue)) {
+                Write-Host "WARNING: Network '$net': switch '$switchName' not found — VMs using this network will fall back to 'Default Switch'" -ForegroundColor Yellow
+            }
         }
     }
 }
@@ -638,7 +609,11 @@ $dismConversionBlock
 
     # Attach network
     if ($cfg.network) {
-        $switchName = $stack.networks[$cfg.network].switch_name
+        $netCfg = $stack.networks[$cfg.network]
+        $switchName = if ($netCfg) { Resolve-VMSwitch $cfg.network $netCfg } else { "Default Switch" }
+        if (-not $netCfg) {
+            Write-Host "WARNING: Network '$($cfg.network)' not found in networks: section — using 'Default Switch'" -ForegroundColor Yellow
+        }
         Invoke-IfLive "Connect-VMNetworkAdapter $vmName to switch $switchName" {
             Connect-VMNetworkAdapter -VMName $vmName -SwitchName $switchName
         }
@@ -953,6 +928,7 @@ function Test-AllVMs {
 
 function Invoke-Validate {
     $errors = @()
+    $warnings = @()
 
     # Validate VMs
     if (-not $stack.vms) {
@@ -986,17 +962,10 @@ function Invoke-Validate {
     if ($stack.networks) {
         foreach ($netName in $stack.networks.Keys) {
             $cfg = $stack.networks[$netName]
-            foreach ($field in @("type","switch_name")) {
-                if (-not $cfg[$field]) {
-                    $errors += "Network '$netName': missing required field '$field'"
-                }
-            }
-            if ($cfg.type -eq "nat") {
-                foreach ($field in @("subnet","gateway")) {
-                    if (-not $cfg[$field]) {
-                        $errors += "Network '$netName' (nat): missing required field '$field'"
-                    }
-                }
+            if (-not $cfg.switch_name) {
+                $errors += "Network '$netName': missing required field 'switch_name'"
+            } elseif (-not (Get-VMSwitch -Name $cfg.switch_name -ErrorAction SilentlyContinue)) {
+                $warnings += "Network '$netName': switch '$($cfg.switch_name)' does not exist — VMs will fall back to 'Default Switch'"
             }
         }
     }
@@ -1013,6 +982,11 @@ function Invoke-Validate {
         }
     }
 
+    if ($warnings.Count -gt 0) {
+        foreach ($w in $warnings) {
+            Write-Host "  WARN: $w" -ForegroundColor Yellow
+        }
+    }
     if ($errors.Count -eq 0) {
         Write-Host "$ConfigFile is valid." -ForegroundColor Green
         exit 0
