@@ -32,7 +32,7 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","storage","localmount","localunmount","cp","copy","metrics","web","note","help")]
+    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","storage","localmount","localunmount","cp","copy","metrics","web","dashboard","note","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -1746,7 +1746,7 @@ switch ($Command) {
         }
     }
 
-    "web" {
+    { $_ -in "web","dashboard" } {
         $subCmd = if ($VmName) { $VmName.ToLower() } else { 'status' }
         switch ($subCmd) {
             'install' { Assert-Admin; & "$PSScriptRoot\vm-dashboard-install.ps1" }
