@@ -32,7 +32,7 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","storage","cp","copy","metrics","web","note","help")]
+    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","storage","localmount","localunmount","cp","copy","metrics","web","note","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -80,6 +80,8 @@ COMMANDS
   storage ls              List shared storage volumes (size, % used, mount status)
   storage rm <name>       Delete a storage VHDX (must be unmounted first)
   storage mv <name> <dst> Move a storage VHDX to a new path (must be unmounted first)
+  localmount <name> [S]   Mount a storage VHDX to a host drive letter (default S:)
+  localunmount <name>     Dismount a storage VHDX from the host
   cp / copy <src> <dest>  Copy files to/from a VM  (prefix VM paths: vmname:path)
   note <show|add|edit> <vm>  Show, append to, or edit VM notes
 
@@ -117,6 +119,8 @@ $CommandHelp = @{
     "mount"    = "mount <vm> <storageName>`n  Hot-add a shared storage VHDX (from the storage: section) to a running VM."
     "unmount"  = "unmount <vm> <storageName>`n  Remove a shared storage VHDX from a VM."
     "storage"  = "storage <ls|rm|mv> [args]`n  Manage shared storage VHDXes.`n  ls / list              List all volumes (path, size, % allocated, mount status)`n  rm / remove <name>     Delete a VHDX (must be unmounted)`n  mv / move <name> <dst> Move a VHDX to a new path (must be unmounted; update vmstack.yaml path after)"
+    "localmount"   = "localmount <storageName> [driveLetter]`n  Mount a shared storage VHDX to a host drive letter (default S:).`n  Allows direct file access like a Docker volume.`n  WARNING: do not use the same drive simultaneously from a VM — risk of data corruption."
+    "localunmount" = "localunmount <storageName>`n  Dismount a shared storage VHDX from the host drive."
     "cp"       = "cp / copy <source> <destination>`n  Copy files between host and a running VM.`n  Host to VM:  cp C:\local\file.txt  myvm:C:\dest\`n  VM to host:  cp myvm:C:\path\file.txt  .`n  Prefix VM paths with vmname: (colon). VM-to-host prompts for Administrator credentials."
     "metrics"  = "metrics [install|start|stop|status|remove]`n  Manage the vm-metrics Prometheus exporter. Default: status.`n  install: run vm-metrics-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-metrics-install.ps1"
     "web"      = "web [install|start|stop|status|remove]`n  Manage the vm-dashboard web UI. Default: status.`n  install: run vm-dashboard-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-dashboard-install.ps1  |  Run directly: ./vm-dashboard.ps1"
@@ -1091,7 +1095,67 @@ function Dismount-VMStorage {
     Write-Host "Unmounted '$storageName' from $vmName"
 }
 
-function Invoke-StorageCommand {
+function Mount-LocalStorage {
+    param([string]$StorageName, [string]$DriveLetter = 'S')
+
+    if (-not $stack.storage -or -not $stack.storage[$StorageName]) {
+        Write-Host "Storage '$StorageName' not found in $ConfigFile" -ForegroundColor Red; return
+    }
+    $storagePath = Resolve-StoragePath $stack.storage[$StorageName].path
+    if (-not (Test-Path $storagePath)) {
+        Write-Host "File not found: $storagePath" -ForegroundColor Yellow; return
+    }
+
+    $letter = $DriveLetter.TrimEnd(':').ToUpper()
+
+    # Warn if any VM has it mounted (concurrent access risks data corruption)
+    $mounted = Get-VM -ErrorAction SilentlyContinue |
+        Where-Object { (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue | Where-Object Path -eq $storagePath) } |
+        Select-Object -ExpandProperty Name
+    if ($mounted) {
+        Write-Host "WARNING: '$StorageName' is also mounted on VM(s): $($mounted -join ', ')" -ForegroundColor Yellow
+        Write-Host "  Concurrent host+VM access may corrupt data. Proceed with caution." -ForegroundColor Yellow
+    }
+
+    # Check drive letter not already in use
+    if (Test-Path "${letter}:\") {
+        Write-Host "Drive ${letter}: is already in use." -ForegroundColor Red; return
+    }
+
+    Write-Host "Mounting $storagePath → ${letter}:\"
+    $vhd = Mount-VHD -Path $storagePath -PassThru -ErrorAction Stop
+    $partition = Get-Disk -Number $vhd.DiskNumber |
+        Get-Partition |
+        Where-Object { $_.Type -notin @('System', 'Reserved', 'Recovery', 'Unknown') -and $_.Size -gt 1MB } |
+        Select-Object -First 1
+
+    if (-not $partition) {
+        Write-Host "WARNING: No usable partition found on the VHDX (may not be initialized yet)." -ForegroundColor Yellow
+        Write-Host "  Disk is attached as disk $($vhd.DiskNumber) — initialize it manually if needed." -ForegroundColor Gray
+        return
+    }
+
+    $partition | Set-Partition -NewDriveLetter $letter
+    Write-Host "Mounted as ${letter}:\" -ForegroundColor Green
+}
+
+function Dismount-LocalStorage {
+    param([string]$StorageName)
+
+    if (-not $stack.storage -or -not $stack.storage[$StorageName]) {
+        Write-Host "Storage '$StorageName' not found in $ConfigFile" -ForegroundColor Red; return
+    }
+    $storagePath = Resolve-StoragePath $stack.storage[$StorageName].path
+
+    if (-not (Get-VHD -Path $storagePath -ErrorAction SilentlyContinue | Where-Object Attached)) {
+        Write-Host "'$StorageName' is not currently mounted locally." -ForegroundColor Yellow; return
+    }
+
+    Dismount-VHD -Path $storagePath -ErrorAction Stop
+    Write-Host "Dismounted '$StorageName' from host." -ForegroundColor Green
+}
+
+
     param([string]$SubCmd, [string]$StorageArg, [string]$DestArg)
 
     switch -Regex ($SubCmd.ToLower()) {
@@ -1503,6 +1567,26 @@ switch ($Command) {
         Assert-Admin
         # $VmName=subcommand  $ExecCommand=storageName  $StorageName=destPath
         Invoke-StorageCommand $VmName $ExecCommand $StorageName
+    }
+
+    "localmount" {
+        Assert-Admin
+        # $VmName=storageName  $ExecCommand=driveLetter (optional, default S)
+        if (-not $VmName) {
+            Write-Host "Usage: ./vm-compose.ps1 localmount <storageName> [driveLetter]" -ForegroundColor Yellow
+        } else {
+            $letter = if ($ExecCommand) { $ExecCommand } else { 'S' }
+            Mount-LocalStorage -StorageName $VmName -DriveLetter $letter
+        }
+    }
+
+    "localunmount" {
+        Assert-Admin
+        if (-not $VmName) {
+            Write-Host "Usage: ./vm-compose.ps1 localunmount <storageName>" -ForegroundColor Yellow
+        } else {
+            Dismount-LocalStorage -StorageName $VmName
+        }
     }
 
     { $_ -in "cp","copy" } {
