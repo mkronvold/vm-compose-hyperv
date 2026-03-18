@@ -683,8 +683,8 @@ if (`$dockerVolume) {
 
 Install-WindowsFeature -Name Containers -IncludeAllSubFeature -IncludeManagementTools
 
-Invoke-WebRequest -Uri '$($cfg.mirantis_url)' -OutFile 'C:\Setup\mcr-runtime.msi'
-Start-Process msiexec.exe -ArgumentList '/i C:\Setup\mcr-runtime.msi /qn /norestart' -Wait
+Invoke-WebRequest -Uri 'https://get.mirantis.com/install.ps1' -OutFile 'C:\Setup\mcr-install.ps1' -UseBasicParsing
+& 'C:\Setup\mcr-install.ps1' -Channel stable
 
 Start-Service docker
 Set-Service docker -StartupType Automatic
@@ -1080,7 +1080,7 @@ function Invoke-Validate {
     } else {
         foreach ($vmName in $stack.vms.Keys) {
             $cfg = $stack.vms[$vmName]
-            foreach ($field in @("iso","memory_gb","cpus","os_disk_gb","persistent_disk_gb","mirantis_url")) {
+            foreach ($field in @("iso","memory_gb","cpus","os_disk_gb","persistent_disk_gb")) {
                 if (-not $cfg[$field]) {
                     $errors += "VM '$vmName': missing required field '$field'"
                 }
