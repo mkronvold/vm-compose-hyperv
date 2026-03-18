@@ -8,6 +8,8 @@ networks:
   # Use "Default Switch" for automatic NAT + DHCP (built into Windows 10/11/Server).
   natnet:
     switch_name: "Default Switch"
+  bridge:
+    switch_name: "External"
   # Example custom switch:
   # corpnet:
   #   switch_name: "External-Corp"
@@ -28,7 +30,7 @@ vms:
     cpus: 4
     os_disk_gb: 80
     persistent_disk_gb: 50
-    network: natnet
+    network: external
     mac_address: "00:15:5D:AB:CD:01"   # optional — omit for dynamic MAC
     mirantis_url: "https://download.mirantis.com/runtime/mcr-23.0.0.msi"
     mount:

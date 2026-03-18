@@ -32,7 +32,7 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","build","down","restart","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","metrics","web","note","help")]
+    [ValidateSet("up","build","down","restart","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","cp","metrics","web","note","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -77,6 +77,7 @@ COMMANDS
   version         Show version info
   mount <vm> <storage>    Hot-add a shared storage disk to a VM
   unmount <vm> <storage>  Remove a shared storage disk from a VM
+  cp <src> <dest>         Copy files to/from a VM  (prefix VM paths: vmname:path)
   note <show|add|edit> <vm>  Show, append to, or edit VM notes
 
 SERVICES
@@ -112,6 +113,7 @@ $CommandHelp = @{
     "version"  = "version`n  Print version, PowerShell version, and active config file path."
     "mount"    = "mount <vm> <storageName>`n  Hot-add a shared storage VHDX (from the storage: section) to a running VM."
     "unmount"  = "unmount <vm> <storageName>`n  Remove a shared storage VHDX from a VM."
+    "cp"       = "cp <source> <destination>`n  Copy files between host and a running VM.`n  Host to VM:  cp C:\local\file.txt  myvm:C:\dest\`n  VM to host:  cp myvm:C:\path\file.txt  .`n  Prefix VM paths with vmname: (colon). VM-to-host prompts for Administrator credentials."
     "metrics"  = "metrics [install|start|stop|status|remove]`n  Manage the vm-metrics Prometheus exporter. Default: status.`n  install: run vm-metrics-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-metrics-install.ps1"
     "web"      = "web [install|start|stop|status|remove]`n  Manage the vm-dashboard web UI. Default: status.`n  install: run vm-dashboard-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-dashboard-install.ps1  |  Run directly: ./vm-dashboard.ps1"
     "note"     = "note <show|add|edit> <vm>`n  show: Print the VM's Notes field.`n  add:  Prompt for text and append it to the Notes field.`n  edit: Open the Notes field in Notepad for full editing."
@@ -371,6 +373,10 @@ function Build-VM {
     $encodedPassword = [Convert]::ToBase64String(
         [System.Text.Encoding]::Unicode.GetBytes($adminPassword + "AdministratorPassword")
     )
+    # AutoLogon uses a different suffix
+    $encodedAutoLogonPassword = [Convert]::ToBase64String(
+        [System.Text.Encoding]::Unicode.GetBytes($adminPassword + "Password")
+    )
 
     # DISM edition-conversion block for bootstrap.ps1 (only when product_key + product_type are set)
     $dismConversionBlock = ""
@@ -486,6 +492,10 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
           <Order>1</Order>
           <Path>powershell -Command "New-Item C:\Setup -ItemType Directory -Force; `$v = Get-Volume -FileSystemLabel Unattend -EA SilentlyContinue; if (`$v) { Copy-Item (`$v.DriveLetter + ':\bootstrap.ps1') C:\Setup\bootstrap.ps1 -Force }"</Path>
         </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Path>reg add "HKLM\SYSTEM\CurrentControlSet\Control\Network" /v NewNetworkWindowOff /t REG_SZ /d "" /f</Path>
+        </RunSynchronousCommand>
       </RunSynchronous>
     </component>
   </settings>
@@ -501,6 +511,15 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
         <NetworkLocation>Work</NetworkLocation>
         <ProtectYourPC>3</ProtectYourPC>
       </OOBE>
+      <AutoLogon>
+        <Password>
+          <Value>$encodedAutoLogonPassword</Value>
+          <PlainText>false</PlainText>
+        </Password>
+        <Enabled>true</Enabled>
+        <LogonCount>3</LogonCount>
+        <Username>Administrator</Username>
+      </AutoLogon>
       <UserAccounts>
         <AdministratorPassword>
           <Value>$encodedPassword</Value>
@@ -528,6 +547,13 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
     # Generate bootstrap.ps1
     # -------------------------
     $bootstrap = @"
+`$logPath = 'C:\Setup\bootstrap.log'
+Start-Transcript -Path `$logPath -Append -Force | Out-Null
+Write-Host "Bootstrap started: `$(Get-Date)"
+
+# Set network profile to Private (suppress location dialog)
+Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
+
 # Initialize persistent storage disk
 \$rawDisks = Get-Disk | Where-Object PartitionStyle -eq 'RAW'
 if (\$rawDisks.Count -ge 1) {
@@ -559,6 +585,8 @@ Set-Service docker -StartupType Automatic
 
 docker pull mcr.microsoft.com/windows/servercore:ltsc2022
 $dismConversionBlock
+Write-Host "Bootstrap complete: `$(Get-Date)"
+Stop-Transcript | Out-Null
 "@
 
     Invoke-IfLive "Write bootstrap.ps1 to $SetupDir" {
@@ -605,6 +633,7 @@ $dismConversionBlock
         Add-VMDvdDrive -VMName $vmName -Path $cfg.iso | Out-Null
         Add-VMDvdDrive -VMName $vmName -Path $AnswerIsoPath | Out-Null
         Add-VMHardDiskDrive -VMName $vmName -Path $PersistentVhdPath | Out-Null
+        Enable-VMIntegrationService -VMName $vmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue
     }
 
     # Attach network
@@ -1052,6 +1081,61 @@ function Dismount-VMStorage {
     Write-Host "Unmounted '$storageName' from $vmName"
 }
 
+function Invoke-VMCopy {
+    param(
+        [string]$Source,
+        [string]$Destination
+    )
+
+    # Detect which side is the VM (format: vmname:path)
+    $srcIsVm  = $Source      -match '^([^:]+):(.+)$'
+    $destIsVm = $Destination -match '^([^:]+):(.+)$'
+
+    if ($srcIsVm -and $destIsVm) {
+        Write-Host "ERROR: Both source and destination cannot be VM paths." -ForegroundColor Red; return
+    }
+    if (-not $srcIsVm -and -not $destIsVm) {
+        Write-Host "ERROR: One of source or destination must be a VM path (vmname:path)." -ForegroundColor Red; return
+    }
+
+    if ($destIsVm) {
+        # Host → VM  (uses Copy-VMFile via Guest Service Interface, no credentials needed)
+        $null = $Destination -match '^([^:]+):(.+)$'
+        $vmName  = $Matches[1]
+        $vmPath  = $Matches[2]
+        $srcPath = Resolve-Path $Source -ErrorAction Stop | Select-Object -ExpandProperty Path
+
+        if (-not (Get-VM -Name $vmName -ErrorAction SilentlyContinue)) {
+            Write-Host "VM '$vmName' not found." -ForegroundColor Red; return
+        }
+        Write-Host "Copying '$srcPath' → ${vmName}:$vmPath"
+        Copy-VMFile -VMName $vmName -SourcePath $srcPath -DestinationPath $vmPath `
+                    -FileSource Host -CreateFullPath -Force
+        Write-Host "Done." -ForegroundColor Green
+    } else {
+        # VM → Host  (uses PowerShell Direct — requires VM Integration Services)
+        $null = $Source -match '^([^:]+):(.+)$'
+        $vmName   = $Matches[1]
+        $vmPath   = $Matches[2]
+        $destPath = if ($Destination) { $Destination } else { "." }
+
+        if (-not (Get-VM -Name $vmName -ErrorAction SilentlyContinue)) {
+            Write-Host "VM '$vmName' not found." -ForegroundColor Red; return
+        }
+        $cred = Get-Credential -UserName "Administrator" -Message "Enter Administrator password for '$vmName'"
+        if (-not $cred) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
+
+        Write-Host "Copying ${vmName}:$vmPath → '$destPath'"
+        $session = New-PSSession -VMName $vmName -Credential $cred -ErrorAction Stop
+        try {
+            Copy-Item -FromSession $session -Path $vmPath -Destination $destPath -Recurse -Force
+            Write-Host "Done." -ForegroundColor Green
+        } finally {
+            Remove-PSSession $session -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-WebServiceState {
     param([string]$Name)
     $svc  = Get-Service       -Name $Name -ErrorAction SilentlyContinue
@@ -1298,6 +1382,17 @@ switch ($Command) {
             Write-Host "Usage: ./vm-compose.ps1 unmount <vmName> <storageName>" -ForegroundColor Yellow
         } else {
             Dismount-VMStorage $VmName $StorageName
+        }
+    }
+
+    "cp" {
+        # $VmName = source, $ExecCommand = destination (positional params 1 and 2)
+        if (-not $VmName -or -not $ExecCommand) {
+            Write-Host "Usage: ./vm-compose.ps1 cp <source> <destination>" -ForegroundColor Yellow
+            Write-Host "  Host to VM:  cp C:\local\file.txt  myvm:C:\dest\" -ForegroundColor Gray
+            Write-Host "  VM to host:  cp myvm:C:\path\file.txt  ." -ForegroundColor Gray
+        } else {
+            Invoke-VMCopy -Source $VmName -Destination $ExecCommand
         }
     }
 
