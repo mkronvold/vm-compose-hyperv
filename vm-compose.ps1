@@ -339,10 +339,27 @@ function Build-VM {
         # Destroy VM before rebuilding
         Write-Host "Destroying '$vmName' for rebuild..." -ForegroundColor Yellow
         Invoke-IfLive "Stop-VM $vmName (force)" {
-            if ($existingVm.State -ne 'Off') { Stop-VM -Name $vmName -Force }
+            if ($existingVm.State -ne 'Off') { Stop-VM -Name $vmName -Force -TurnOff -ErrorAction SilentlyContinue }
+        }
+        Invoke-IfLive "Remove snapshots for $vmName (merges checkpoint avhdx files)" {
+            Get-VMSnapshot -VMName $vmName -ErrorAction SilentlyContinue |
+                Remove-VMSnapshot -IncludeAllChildSnapshots -Confirm:$false -ErrorAction SilentlyContinue
         }
         Invoke-IfLive "Remove-VM $vmName" {
             Remove-VM -Name $vmName -Force
+        }
+        # Delete any orphaned avhdx differencing disks linked to shared storage
+        if ($stack.storage) {
+            foreach ($sName in $stack.storage.Keys) {
+                $sCfg = $stack.storage[$sName]
+                $sPath = Resolve-StoragePath $sCfg.path
+                $sDir  = Split-Path $sPath
+                $sBase = [System.IO.Path]::GetFileNameWithoutExtension($sPath)
+                Get-Item "$sDir\${sBase}_*.avhdx" -ErrorAction SilentlyContinue | ForEach-Object {
+                    Write-Host "  Removing orphaned differencing disk: $($_.Name)" -ForegroundColor Gray
+                    Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+                }
+            }
         }
         Write-Host "VM '$vmName' removed. Rebuilding..."
     }
@@ -778,6 +795,8 @@ function Remove-AllVMs {
         if (Get-VM -Name $vm -ErrorAction SilentlyContinue) {
             Invoke-IfLive "Stop-VM $vm + Remove-VM $vm (persistent disk preserved)" {
                 Stop-VM -Name $vm -Force -TurnOff -ErrorAction SilentlyContinue
+                Get-VMSnapshot -VMName $vm -ErrorAction SilentlyContinue |
+                    Remove-VMSnapshot -IncludeAllChildSnapshots -Confirm:$false -ErrorAction SilentlyContinue
                 Remove-VM -Name $vm -Force
             }
             Write-Host "Destroyed VM $vm (persistent disk preserved)"
