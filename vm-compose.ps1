@@ -1069,26 +1069,87 @@ function Test-AllVMs {
               Select-Object -First 1
 
         Write-Host ""
-        Write-Host "VM: $vm"
-        Write-Host "State: $state"
-        Write-Host "IP: $ip"
+        Write-Host "VM: $vm" -ForegroundColor Cyan
+        Write-Host "  State : $state"
+        Write-Host "  IP    : $(if ($ip) { $ip } else { '(none)' })"
 
         if ($state -ne "Running") {
-            Write-Host "Docker: VM not running" -ForegroundColor Yellow
+            Write-Host "  Docker: VM not running" -ForegroundColor Yellow
             continue
         }
 
         try {
-            $docker = Invoke-Command -VMName $vm -ScriptBlock {
-                docker info --format "{{.ServerVersion}}"
+            $checks = Invoke-Command -VMName $vm -ScriptBlock {
+                $ok  = [char]0x2713  # ✓
+                $bad = [char]0x2717  # ✗
+
+                # Docker
+                $dockerVer = & docker info --format '{{.ServerVersion}}' 2>$null
+                $dockerOk  = $LASTEXITCODE -eq 0 -and $dockerVer
+
+                # Containers feature
+                $feature = (Get-WindowsFeature -Name Containers -ErrorAction SilentlyContinue).InstallState -eq 'Installed'
+
+                # Persistent data disk (DockerData volume)
+                $dockerVol = Get-Volume -FileSystemLabel 'DockerData' -ErrorAction SilentlyContinue
+
+                # Docker daemon.json
+                $daemonJson = Test-Path 'C:\ProgramData\docker\config\daemon.json'
+
+                # Docker data-root configured on persistent disk
+                $dataRoot = $null
+                if ($daemonJson) {
+                    $cfg = Get-Content 'C:\ProgramData\docker\config\daemon.json' -Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
+                    $dataRoot = $cfg.'data-root'
+                }
+
+                # Shared storage volumes (any non-OS, non-DockerData volumes)
+                $sharedVols = Get-Volume -ErrorAction SilentlyContinue |
+                    Where-Object { $_.DriveType -eq 'Fixed' -and $_.DriveLetter -and
+                                   $_.FileSystemLabel -notin @('','DockerData') -and
+                                   $_.DriveLetter -ne 'C' }
+
+                # Bootstrap log last line
+                $lastLine = if (Test-Path 'C:\Setup\bootstrap.log') {
+                    (Get-Content 'C:\Setup\bootstrap.log' | Select-String 'Bootstrap' | Select-Object -Last 1).Line
+                } else { '(no log)' }
+
+                [PSCustomObject]@{
+                    DockerOk      = $dockerOk
+                    DockerVersion = $dockerVer
+                    FeatureOk     = $feature
+                    DockerVolume  = if ($dockerVol) { "$($dockerVol.DriveLetter): ($([math]::Round($dockerVol.SizeRemaining/1GB,1)) GB free)" } else { $null }
+                    DaemonJson    = $daemonJson
+                    DataRoot      = $dataRoot
+                    SharedVols    = $sharedVols | ForEach-Object { "$($_.DriveLetter): $($_.FileSystemLabel)" }
+                    BootstrapLast = $lastLine
+                }
             } -ErrorAction Stop
 
-            Write-Host "Docker: OK (version $docker)" -ForegroundColor Green
-        }
-        catch {
-            Write-Host "Docker: NOT RESPONDING" -ForegroundColor Red
+            $fmt = { param($ok, $label, $val)
+                $mark = if ($ok) { '[+]' } else { '[!]' }
+                $color = if ($ok) { 'Green' } else { 'Red' }
+                Write-Host ("  {0} {1,-22} {2}" -f $mark, $label, $val) -ForegroundColor $color
+            }
+
+            & $fmt $checks.FeatureOk     'Containers feature'  $(if ($checks.FeatureOk) { 'Installed' } else { 'MISSING' })
+            & $fmt $checks.DockerOk      'Docker Engine'       $(if ($checks.DockerVersion) { "v$($checks.DockerVersion)" } else { 'NOT RUNNING' })
+            & $fmt ($null -ne $checks.DockerVolume) 'DockerData volume'  $(if ($checks.DockerVolume) { $checks.DockerVolume } else { 'NOT FOUND (check disk offline policy)' })
+            & $fmt $checks.DaemonJson    'daemon.json'         $(if ($checks.DataRoot) { "data-root=$($checks.DataRoot)" } else { 'missing or unconfigured' })
+            if ($checks.SharedVols) {
+                foreach ($sv in $checks.SharedVols) {
+                    & $fmt $true 'Shared volume' $sv
+                }
+            } else {
+                Write-Host "  [ ] Shared volumes         (none mounted)" -ForegroundColor DarkGray
+            }
+            Write-Host "  Bootstrap: $($checks.BootstrapLast)" -ForegroundColor $(if ($checks.BootstrapLast -like '*complete*') { 'Green' } else { 'Yellow' })
+
+        } catch {
+            Write-Host "  [!] Could not connect via PowerShell Direct: $_" -ForegroundColor Red
         }
     }
+    Write-Host ""
 }
 
 function Invoke-Validate {
