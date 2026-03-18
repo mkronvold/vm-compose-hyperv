@@ -693,13 +693,20 @@ if (`$containerFeature.InstallState -ne 'Installed') {
     exit
 }
 
-# Stage 2: Install Docker Engine (free, via NuGet/DockerMsftProvider).
-# Runs after Containers feature reboot. Idempotent — skips if docker service exists.
+# Stage 2: Install Docker Engine via static binaries from download.docker.com.
+# Idempotent — skips if docker service already exists.
 if (-not (Get-Service docker -ErrorAction SilentlyContinue)) {
     Write-Host 'Installing Docker Engine...'
-    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
-    Install-Module -Name DockerMsftProvider -Repository PSGallery -Force
-    Install-Package -Name docker -ProviderName DockerMsftProvider -Force
+    # Fetch latest stable version tag from GitHub API
+    `$release = Invoke-RestMethod 'https://api.github.com/repos/moby/moby/releases/latest' -UseBasicParsing
+    `$dockerVersion = `$release.tag_name.TrimStart('v')
+    Write-Host "Docker version: `$dockerVersion"
+    `$zipUrl = "https://download.docker.com/win/static/stable/x86_64/docker-`$dockerVersion.zip"
+    Invoke-WebRequest -UseBasicParsing -Uri `$zipUrl -OutFile 'C:\Setup\docker.zip'
+    Expand-Archive -Path 'C:\Setup\docker.zip' -DestinationPath 'C:\Program Files' -Force
+    `$env:Path = "`$env:Path;C:\Program Files\Docker"
+    [Environment]::SetEnvironmentVariable('Path', "`$([Environment]::GetEnvironmentVariable('Path','Machine'));C:\Program Files\Docker", 'Machine')
+    dockerd --register-service
     Start-Service docker
     Set-Service docker -StartupType Automatic
 }
