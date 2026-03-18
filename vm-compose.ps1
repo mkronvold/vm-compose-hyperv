@@ -1156,6 +1156,7 @@ function Dismount-LocalStorage {
 }
 
 
+function Invoke-StorageCommand {
     param([string]$SubCmd, [string]$StorageArg, [string]$DestArg)
 
     switch -Regex ($SubCmd.ToLower()) {
