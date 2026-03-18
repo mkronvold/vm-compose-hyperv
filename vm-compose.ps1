@@ -439,7 +439,8 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
 <unattend xmlns="urn:schemas-microsoft-com:unattend"
           xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
   <settings pass="windowsPE">
-    <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+    <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
       <ImageInstall>
         <OSImage>
           <InstallFrom>
@@ -515,7 +516,8 @@ $keyNotesComment
     </component>
   </settings>
   <settings pass="oobeSystem">
-    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
       <OOBE>
         <HideEULAPage>true</HideEULAPage>
         <NetworkLocation>Work</NetworkLocation>
@@ -540,7 +542,8 @@ $keyNotesComment
 "@
 
     Invoke-IfLive "Write Autounattend.xml to $SetupDir" {
-        $unattend | Out-File "$SetupDir\Autounattend.xml" -Encoding utf8 -Force
+        # UTF-8 without BOM — WinPE's XML parser rejects BOM
+        [System.IO.File]::WriteAllText("$SetupDir\Autounattend.xml", $unattend, [System.Text.UTF8Encoding]::new($false))
     }
 
     # -------------------------
