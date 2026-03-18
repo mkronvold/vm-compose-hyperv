@@ -127,8 +127,9 @@ Start-PodeServer -Threads 2 {
                         if ($vhd -and $vhd.Size -gt 0) {
                             $pctAlloc = '{0:0}%' -f ($vhd.FileSize / $vhd.Size * 100)
                         }
-                        if ($vhd -and $vhd.Attached -and $null -ne $vhd.DiskNumber -and $vhd.DiskNumber -ge 0) {
-                            $dl = Get-Disk -Number $vhd.DiskNumber -ErrorAction SilentlyContinue |
+                        $diskNum = ($vhd.DiskNumber -as [int?])
+                        if ($vhd -and $vhd.Attached -and $null -ne $diskNum -and $diskNum -ge 0) {
+                            $dl = Get-Disk -Number $diskNum -ErrorAction SilentlyContinue |
                                   Get-Partition -ErrorAction SilentlyContinue |
                                   Where-Object { $_.DriveLetter -and $_.DriveLetter -ne [char]0 } |
                                   Select-Object -First 1 -ExpandProperty DriveLetter
@@ -305,7 +306,7 @@ $($_.ScriptStackTrace)</pre>
                 $rawPath = $stack.storage[$storageName].path
                 $sp = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
                 $vhd = Get-VHD -Path $sp -ErrorAction SilentlyContinue
-                if ($vhd -and $vhd.Attached -and $null -ne $vhd.DiskNumber -and $vhd.DiskNumber -ge 0) {
+                if ($vhd -and $vhd.Attached -and $null -ne ($vhd.DiskNumber -as [int?]) -and ($vhd.DiskNumber -as [int?]) -ge 0) {
                     $hasHostMountedConflict = $true
                     break
                 }
@@ -339,7 +340,7 @@ $($_.ScriptStackTrace)</pre>
                 $rawPath = $stack.storage[$storageName].path
                 $sp = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
                 $vhd = Get-VHD -Path $sp -ErrorAction SilentlyContinue
-                if ($vhd -and $vhd.Attached -and $null -ne $vhd.DiskNumber -and $vhd.DiskNumber -ge 0) {
+                if ($vhd -and $vhd.Attached -and $null -ne ($vhd.DiskNumber -as [int?]) -and ($vhd.DiskNumber -as [int?]) -ge 0) {
                     $hasHostMountedConflict = $true
                     break
                 }
