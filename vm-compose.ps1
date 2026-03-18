@@ -1278,7 +1278,7 @@ function Invoke-StorageCommand {
         }
 
         '^(init|initialize)$' {
-            $storageName = $SubArgs[0]
+            $storageName = $StorageArg
             if (-not $storageName -or -not $stack.storage -or -not $stack.storage[$storageName]) {
                 Write-Host "Usage: ./vm-compose.ps1 storage init <name>" -ForegroundColor Yellow; return
             }
