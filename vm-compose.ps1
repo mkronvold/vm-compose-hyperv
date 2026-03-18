@@ -661,6 +661,13 @@ Write-Host "Bootstrap started: `$(Get-Date)"
 # Set network profile to Private (suppress location dialog)
 Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
 
+# Bring offline disks online (Windows marks VHDXes offline by admin policy after reboot)
+Get-Disk | Where-Object IsOffline | ForEach-Object {
+    Write-Host "Bringing disk $($_.Number) ($($_.FriendlyName)) online..."
+    Set-Disk -Number `$_.Number -IsOffline `$false
+    Set-Disk -Number `$_.Number -IsReadOnly `$false
+}
+
 # Initialize persistent storage disk (idempotent — only acts on RAW disks)
 `$rawDisks = Get-Disk | Where-Object PartitionStyle -eq 'RAW'
 if (`$rawDisks.Count -ge 1) {
@@ -669,6 +676,11 @@ if (`$rawDisks.Count -ge 1) {
         New-Partition -UseMaximumSize -AssignDriveLetter |
         Format-Volume -FileSystem NTFS -NewFileSystemLabel 'DockerData' -Confirm:`$false
 }
+
+# Assign drive letters to any partitions that have none (idempotent)
+Get-Disk | Where-Object { `$_.PartitionStyle -ne 'RAW' -and -not `$_.IsOffline } |
+    Get-Partition | Where-Object { -not `$_.DriveLetter -and `$_.Size -gt 100MB -and `$_.Type -notin @('System','Reserved','Recovery') } |
+    ForEach-Object { `$_ | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue }
 
 # Write Docker daemon config (idempotent — skip if already written)
 `$dockerVolume = Get-Volume -FileSystemLabel 'DockerData' -ErrorAction SilentlyContinue
