@@ -661,7 +661,7 @@ Write-Host "Bootstrap started: `$(Get-Date)"
 # Set network profile to Private (suppress location dialog)
 Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
 
-# Initialize persistent storage disk
+# Initialize persistent storage disk (idempotent — only acts on RAW disks)
 `$rawDisks = Get-Disk | Where-Object PartitionStyle -eq 'RAW'
 if (`$rawDisks.Count -ge 1) {
     `$disk = `$rawDisks[0]
@@ -670,9 +670,9 @@ if (`$rawDisks.Count -ge 1) {
         Format-Volume -FileSystem NTFS -NewFileSystemLabel 'DockerData' -Confirm:`$false
 }
 
-# Write Docker daemon config now so it's in place when Docker first starts after reboot
+# Write Docker daemon config (idempotent — skip if already written)
 `$dockerVolume = Get-Volume -FileSystemLabel 'DockerData' -ErrorAction SilentlyContinue
-if (`$dockerVolume) {
+if (`$dockerVolume -and -not (Test-Path 'C:\ProgramData\docker\config\daemon.json')) {
     `$dockerDrive = `$dockerVolume.DriveLetter + ':'
     New-Item -ItemType Directory -Path "`$dockerDrive\docker-data" -Force | Out-Null
     `$daemonConfig = @{ 'data-root' = "`$dockerDrive\docker-data" }
@@ -680,10 +680,29 @@ if (`$dockerVolume) {
     `$daemonConfig | ConvertTo-Json | Out-File 'C:\ProgramData\docker\config\daemon.json' -Encoding utf8 -Force
 }
 
-# Install Docker CE (free, Microsoft-maintained). The script installs the Containers
-# feature, reboots via RunOnce, then installs Docker CE on the next boot automatically.
-Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/microsoft/Windows-Containers/Main/helpful_tools/Install-DockerCE/install-docker-ce.ps1' -OutFile 'C:\Setup\install-docker-ce.ps1'
-& 'C:\Setup\install-docker-ce.ps1'
+# Stage 1: Install Containers feature — requires a reboot.
+# Register self as RunOnce so bootstrap continues on next boot.
+`$containerFeature = Get-WindowsFeature -Name Containers
+if (`$containerFeature.InstallState -ne 'Installed') {
+    Write-Host 'Installing Containers feature — will reboot and continue...'
+    Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' ``
+        -Name 'BootstrapContinue' ``
+        -Value 'powershell -ExecutionPolicy Bypass -File "C:\Setup\bootstrap.ps1"'
+    Stop-Transcript | Out-Null
+    Install-WindowsFeature -Name Containers -IncludeAllSubFeature -IncludeManagementTools -Restart
+    exit
+}
+
+# Stage 2: Install Docker Engine (free, via NuGet/DockerMsftProvider).
+# Runs after Containers feature reboot. Idempotent — skips if docker service exists.
+if (-not (Get-Service docker -ErrorAction SilentlyContinue)) {
+    Write-Host 'Installing Docker Engine...'
+    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+    Install-Module -Name DockerMsftProvider -Repository PSGallery -Force
+    Install-Package -Name docker -ProviderName DockerMsftProvider -Force
+    Start-Service docker
+    Set-Service docker -StartupType Automatic
+}
 
 $dismConversionBlock
 Write-Host "Bootstrap complete: `$(Get-Date)"
