@@ -1124,9 +1124,15 @@ function Mount-LocalStorage {
 
     Write-Host "Mounting $storagePath → ${letter}:\"
     $vhd = Mount-VHD -Path $storagePath -PassThru -ErrorAction Stop
+
+    # Disk may come up offline — bring it online and writable
+    $disk = Get-Disk -Number $vhd.DiskNumber
+    if ($disk.IsOffline)  { Set-Disk -Number $vhd.DiskNumber -IsOffline $false }
+    if ($disk.IsReadOnly) { Set-Disk -Number $vhd.DiskNumber -IsReadOnly $false }
+
     $partition = Get-Disk -Number $vhd.DiskNumber |
         Get-Partition |
-        Where-Object { $_.Type -notin @('System', 'Reserved', 'Recovery', 'Unknown') -and $_.Size -gt 1MB } |
+        Where-Object { $_.Size -gt 100MB -and $_.Type -notin @('System', 'Reserved', 'Recovery') } |
         Select-Object -First 1
 
     if (-not $partition) {

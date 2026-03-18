@@ -323,9 +323,13 @@ $($_.ScriptStackTrace)</pre>
             if (-not $letter) { $letter = 'S' }
 
             $vhd = Mount-VHD -Path $sp -PassThru -ErrorAction Stop
+            # Disk may come up offline — bring it online and writable before partition access
+            $disk = Get-Disk -Number $vhd.DiskNumber
+            if ($disk.IsOffline)  { Set-Disk -Number $vhd.DiskNumber -IsOffline $false }
+            if ($disk.IsReadOnly) { Set-Disk -Number $vhd.DiskNumber -IsReadOnly $false }
             $partition = Get-Disk -Number $vhd.DiskNumber |
                 Get-Partition |
-                Where-Object { $_.Type -notin @('System','Reserved','Recovery','Unknown') -and $_.Size -gt 1MB } |
+                Where-Object { $_.Size -gt 100MB -and $_.Type -notin @('System','Reserved','Recovery') } |
                 Select-Object -First 1
             if ($partition) { $partition | Set-Partition -NewDriveLetter $letter }
         } catch { }
