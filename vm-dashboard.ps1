@@ -99,6 +99,59 @@ Start-PodeServer -Threads 2 {
 "@
             }
 
+            # Build shared storage rows
+            $vmRoot = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
+            $storageRows = ""
+            if ($stack.storage) {
+                foreach ($storageName in $stack.storage.Keys) {
+                    $sCfg = $stack.storage[$storageName]
+                    $rawPath = $sCfg.path
+                    $sp = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
+                    $virtGB   = $sCfg.size_gb
+                    $usedGB   = '-'
+                    $pctAlloc = '-'
+                    $hostDrive = '-'
+                    $mountBtn  = ''
+
+                    if (Test-Path $sp) {
+                        $usedGB = [math]::Round((Get-Item $sp).Length / 1GB, 2)
+                        $vhd = Get-VHD -Path $sp -ErrorAction SilentlyContinue
+                        if ($vhd -and $vhd.Size -gt 0) {
+                            $pctAlloc = '{0:0}%' -f ($vhd.FileSize / $vhd.Size * 100)
+                        }
+                        if ($vhd -and $vhd.Attached) {
+                            $dl = Get-Disk -Number $vhd.DiskNumber -ErrorAction SilentlyContinue |
+                                  Get-Partition -ErrorAction SilentlyContinue |
+                                  Where-Object { $_.DriveLetter -and $_.DriveLetter -ne [char]0 } |
+                                  Select-Object -First 1 -ExpandProperty DriveLetter
+                            $hostDrive = if ($dl) { "${dl}:\" } else { "Attached" }
+                            $mountBtn  = "<form method='post' action='/storage/$storageName/localunmount' style='display:inline'><button class='btn btn-sm btn-warning'>&#x23CF; Unmount</button></form>"
+                        } else {
+                            $mountBtn  = "<form method='post' action='/storage/$storageName/localmount' style='display:inline'><button class='btn btn-sm btn-outline-primary'>&#x1F4BE; Mount</button></form>"
+                        }
+                    } else {
+                        $mountBtn = "<span class='badge bg-danger'>MISSING</span>"
+                    }
+
+                    $mountedVMs = (Get-VM -ErrorAction SilentlyContinue |
+                        Where-Object { (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue |
+                            Where-Object Path -eq $sp) } |
+                        Select-Object -ExpandProperty Name) -join ', '
+                    if (-not $mountedVMs) { $mountedVMs = '-' }
+
+                    $storageRows += "<tr><td><strong>$storageName</strong></td><td><code class='small'>$sp</code></td><td>${virtGB} GB</td><td>${usedGB} GB</td><td>$pctAlloc</td><td>$mountedVMs</td><td>$hostDrive</td><td>$mountBtn</td></tr>"
+                }
+            }
+            $storageSection = if ($storageRows) { @"
+<h4 class="mt-4">&#x1F4BE; Shared Storage</h4>
+<table class="table table-sm table-bordered bg-white shadow-sm">
+  <thead class="table-dark">
+    <tr><th>Name</th><th>Path</th><th>Virtual</th><th>On Disk</th><th>%Alloc</th><th>VM Mounts</th><th>Host Drive</th><th></th></tr>
+  </thead>
+  <tbody>$storageRows</tbody>
+</table>
+"@ } else { "" }
+
             Write-PodeHtmlResponse -Value @"
 <!doctype html>
 <html lang="en">
@@ -118,6 +171,7 @@ Start-PodeServer -Threads 2 {
     </thead>
     <tbody>$rows</tbody>
   </table>
+  $storageSection
   <p class="text-muted small">Metrics: <a href="http://localhost:9090/metrics" target="_blank">http://localhost:9090/metrics</a></p>
 </div>
 </body>
@@ -164,7 +218,17 @@ $($_.ScriptStackTrace)</pre>
                 "Paused"  { "warning" } default { "danger" }
             }
             $ips       = @($adapters.IPAddresses | Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' })
-            $diskList  = ($disks.Path        | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
+            $diskList  = ($disks | ForEach-Object {
+                $dPath = $_.Path
+                $vhd = Get-VHD -Path $dPath -ErrorAction SilentlyContinue
+                $sizeInfo = if ($vhd -and $vhd.Size -gt 0) {
+                    $v = [math]::Round($vhd.Size / 1GB, 1)
+                    $u = [math]::Round($vhd.FileSize / 1GB, 2)
+                    $p = '{0:0}' -f ($vhd.FileSize / $vhd.Size * 100)
+                    " &nbsp;<span class='badge bg-secondary'>${v} GB</span> <span class='text-muted small'>${u} GB used (${p}%)</span>"
+                } else { "" }
+                "<li class='list-group-item small'><code>$dPath</code>$sizeInfo</li>"
+            }) -join ""
             $ipList    = ($ips               | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
             $snapList  = ($snaps.Name        | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
             $macList   = ($adapters | ForEach-Object {
@@ -237,6 +301,48 @@ $($_.ScriptStackTrace)</pre>
     Add-PodeRoute -Method Post -Path "/vm/:name/restart" -ScriptBlock {
         $vmName = $WebEvent.Parameters['name']
         if (Get-VM -Name $vmName -ErrorAction SilentlyContinue) { Restart-VM -Name $vmName -Force -ErrorAction SilentlyContinue }
+        Move-PodeResponseUrl -Url "/"
+    }
+
+    # -------------------------------------------------------
+    # POST /storage/:name/localmount|localunmount — host drive actions
+    # -------------------------------------------------------
+    Add-PodeRoute -Method Post -Path "/storage/:name/localmount" -ScriptBlock {
+        try {
+            Import-Module powershell-yaml -ErrorAction Stop
+            $storageName = $WebEvent.Parameters['name']
+            $cfgFile  = Get-PodeState -Name 'ConfigFile'
+            $stack    = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
+            $vmRoot   = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
+            $rawPath  = $stack.storage[$storageName].path
+            $sp       = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
+
+            # Pick first available letter starting from S
+            $letter = 'S','T','U','V','W','X','Y','Z','R','Q','P' |
+                      Where-Object { -not (Test-Path "${_}:\") } | Select-Object -First 1
+            if (-not $letter) { $letter = 'S' }
+
+            $vhd = Mount-VHD -Path $sp -PassThru -ErrorAction Stop
+            $partition = Get-Disk -Number $vhd.DiskNumber |
+                Get-Partition |
+                Where-Object { $_.Type -notin @('System','Reserved','Recovery','Unknown') -and $_.Size -gt 1MB } |
+                Select-Object -First 1
+            if ($partition) { $partition | Set-Partition -NewDriveLetter $letter }
+        } catch { }
+        Move-PodeResponseUrl -Url "/"
+    }
+
+    Add-PodeRoute -Method Post -Path "/storage/:name/localunmount" -ScriptBlock {
+        try {
+            Import-Module powershell-yaml -ErrorAction Stop
+            $storageName = $WebEvent.Parameters['name']
+            $cfgFile  = Get-PodeState -Name 'ConfigFile'
+            $stack    = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
+            $vmRoot   = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
+            $rawPath  = $stack.storage[$storageName].path
+            $sp       = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
+            Dismount-VHD -Path $sp -ErrorAction SilentlyContinue
+        } catch { }
         Move-PodeResponseUrl -Url "/"
     }
 
