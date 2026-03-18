@@ -669,27 +669,21 @@ if (`$rawDisks.Count -ge 1) {
         Format-Volume -FileSystem NTFS -NewFileSystemLabel 'DockerData' -Confirm:`$false
 }
 
-# Get DockerData volume drive letter
+# Write Docker daemon config now so it's in place when Docker first starts after reboot
 `$dockerVolume = Get-Volume -FileSystemLabel 'DockerData' -ErrorAction SilentlyContinue
 if (`$dockerVolume) {
     `$dockerDrive = `$dockerVolume.DriveLetter + ':'
     New-Item -ItemType Directory -Path "`$dockerDrive\docker-data" -Force | Out-Null
-
-    # Configure Docker daemon
     `$daemonConfig = @{ 'data-root' = "`$dockerDrive\docker-data" }
     New-Item -ItemType Directory -Path 'C:\ProgramData\docker\config' -Force | Out-Null
     `$daemonConfig | ConvertTo-Json | Out-File 'C:\ProgramData\docker\config\daemon.json' -Encoding utf8 -Force
 }
 
-Install-WindowsFeature -Name Containers -IncludeAllSubFeature -IncludeManagementTools
+# Install Docker CE (free, Microsoft-maintained). The script installs the Containers
+# feature, reboots via RunOnce, then installs Docker CE on the next boot automatically.
+Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/microsoft/Windows-Containers/Main/helpful_tools/Install-DockerCE/install-docker-ce.ps1' -OutFile 'C:\Setup\install-docker-ce.ps1'
+& 'C:\Setup\install-docker-ce.ps1'
 
-Invoke-WebRequest -Uri 'https://get.mirantis.com/install.ps1' -OutFile 'C:\Setup\mcr-install.ps1' -UseBasicParsing
-& 'C:\Setup\mcr-install.ps1' -Channel stable
-
-Start-Service docker
-Set-Service docker -StartupType Automatic
-
-docker pull mcr.microsoft.com/windows/servercore:ltsc2022
 $dismConversionBlock
 Write-Host "Bootstrap complete: `$(Get-Date)"
 Stop-Transcript | Out-Null
