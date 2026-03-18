@@ -401,10 +401,6 @@ function Build-VM {
         [System.Text.Encoding]::Unicode.GetBytes($adminPassword + "AdministratorPassword")
     )
 
-    # Optional product key XML (only for non-eval ISOs; eval uses DISM post-install conversion)
-    $productKeyXml   = ""  # do not inject key during setup — eval ISO installs without it
-    $keyNotesComment = if ($cfg.product_notes) { "    <!-- $($cfg.product_type) | $($cfg.product_notes) -->" } else { "" }
-
     # DISM edition-conversion block for bootstrap.ps1 (only when product_key + product_type are set)
     $dismConversionBlock = ""
     if ($cfg.product_key -and $cfg.product_type) {
@@ -421,7 +417,6 @@ Write-Host "Converting Evaluation to $($cfg.product_type)..."
 `$result = & dism.exe /Online /Set-Edition:$dismEdition /ProductKey:$($cfg.product_key) /AcceptEula /NoRestart 2>&1
 if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
     Write-Host "Edition conversion succeeded. A reboot is required to complete."
-    # Schedule reboot after bootstrap finishes
     Start-Sleep -Seconds 5
     Restart-Computer -Force
 } else {
@@ -499,7 +494,6 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
       </UserData>
     </component>
   </settings>
-$keyNotesComment
 
   <settings pass="specialize">
     <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
