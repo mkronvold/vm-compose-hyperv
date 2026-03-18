@@ -32,7 +32,7 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","start","build","down","stop","restart","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","cp","copy","metrics","web","note","help")]
+    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","cp","copy","metrics","web","note","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -61,7 +61,7 @@ COMMANDS
   up / start [<vm>]   Build and start VMs (all, or a specific VM)
   build [<vm>]        Provision VMs without starting (all, or a specific VM)
   down / stop [<vm>]  Stop VMs (all, or a specific VM)
-  restart [<vm>]      Restart VMs (all, or a specific VM)
+  restart / reboot [<vm>]  Restart VMs (all, or a specific VM)
   destroy [<vm>]  Delete VM definitions (all, or a specific VM)
   list            List VM names defined in vmstack.yaml
   status [<vm>]   Show status table (all, or a specific VM)
@@ -96,7 +96,7 @@ $CommandHelp = @{
     "up"       = "up / start [<vm>] [-DryRun]`n  Build and START VMs defined in vmstack.yaml.`n  Omit <vm> to target all; specify a VM name to target one.`n  Creates OS disk, persistent disk, unattend.vhdx, unattend.xml, bootstrap.ps1,`n  attaches networks and shared storage, then starts the VM.`n  If a VM already exists, starts it if stopped."
     "build"    = "build [<vm>] [-Force] [-DryRun]`n  Provision VMs (create disks, VM definition) WITHOUT starting them.`n  Omit <vm> to target all; specify a VM name to target one.`n  If a VM already exists, prompts to rebuild (destroy + recreate).`n  Use -Force to rebuild without prompting."
     "down"     = "down / stop [-DryRun]`n  Stop all VMs (forced power-off)."
-    "restart"  = "restart [-DryRun]`n  Restart all VMs."
+    "restart"  = "restart / reboot [-DryRun]`n  Restart all VMs."
     "destroy"  = "destroy [-DryRun]`n  Delete VM definitions. Persistent storage VHDXes are preserved."
     "status"   = "status`n  Print a table of all VMs: state, CPU, memory, IP, uptime."
     "inspect"  = "inspect <vm>  (aliases: describe, show)`n  Show full details for a single VM: CPU, memory, disks, IPs, switches, checkpoints."
@@ -1279,7 +1279,7 @@ switch ($Command) {
         Stop-AllVMs $VmName
     }
 
-    "restart" {
+    { $_ -in "restart","reboot" } {
         Assert-Admin
         Restart-AllVMs $VmName
     }
