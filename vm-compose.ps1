@@ -663,18 +663,19 @@ Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -Er
 
 # Bring offline disks online (Windows marks VHDXes offline by admin policy after reboot)
 Get-Disk | Where-Object IsOffline | ForEach-Object {
-    Write-Host "Bringing disk $($_.Number) ($($_.FriendlyName)) online..."
+    Write-Host "Bringing disk `$(`$_.Number) (`$(`$_.FriendlyName)) online..."
     Set-Disk -Number `$_.Number -IsOffline `$false
     Set-Disk -Number `$_.Number -IsReadOnly `$false
 }
 
 # Initialize persistent storage disk (idempotent — only acts on RAW disks)
-`$rawDisks = Get-Disk | Where-Object PartitionStyle -eq 'RAW'
-if (`$rawDisks.Count -ge 1) {
-    `$disk = `$rawDisks[0]
-    Initialize-Disk -Number `$disk.Number -PartitionStyle GPT -PassThru |
+# Select-Object -First 1 avoids the PS5.1 single-object .Count = $null pitfall
+`$rawDisk = Get-Disk | Where-Object PartitionStyle -eq 'RAW' | Select-Object -First 1
+if (`$rawDisk) {
+    Write-Host "Initializing persistent disk `$(`$rawDisk.Number)..."
+    Initialize-Disk -Number `$rawDisk.Number -PartitionStyle GPT -PassThru |
         New-Partition -UseMaximumSize -AssignDriveLetter |
-        Format-Volume -FileSystem NTFS -NewFileSystemLabel 'DockerData' -Confirm:`$false
+        Format-Volume -FileSystem NTFS -NewFileSystemLabel 'DockerData' -Confirm:`$false | Out-Null
 }
 
 # Assign drive letters to any partitions that have none (idempotent)
