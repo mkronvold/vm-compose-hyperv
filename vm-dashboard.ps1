@@ -409,7 +409,13 @@ $($_.ScriptStackTrace)</pre>
             $vmRoot   = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
             $rawPath  = $stack.storage[$storageName].path
             $sp       = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
-            Dismount-VHD -Path $sp -ErrorAction SilentlyContinue
+            # Dismount-VHD -Path fails when VMMS holds the file handle; use DiskNumber
+            $hostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $sp } | Select-Object -First 1
+            if ($hostDisk) {
+                Dismount-VHD -DiskNumber $hostDisk.Number -ErrorAction Stop
+            } else {
+                Dismount-VHD -Path $sp -ErrorAction Stop
+            }
         } catch { }
         Move-PodeResponseUrl -Url "/"
     }

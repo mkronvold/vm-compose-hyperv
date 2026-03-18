@@ -1258,11 +1258,14 @@ function Dismount-LocalStorage {
     }
     $storagePath = Resolve-StoragePath $stack.storage[$StorageName].path
 
-    if (-not (Get-VHD -Path $storagePath -ErrorAction SilentlyContinue | Where-Object Attached)) {
+    # Get-VHD -Path throws permission errors when VMMS holds the file handle.
+    # Use Get-Disk by Location as the reliable host-mount detector.
+    $hostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $storagePath } | Select-Object -First 1
+    if (-not $hostDisk) {
         Write-Host "'$StorageName' is not currently mounted locally." -ForegroundColor Yellow; return
     }
 
-    Dismount-VHD -Path $storagePath -ErrorAction Stop
+    Dismount-VHD -DiskNumber $hostDisk.Number -ErrorAction Stop
     Write-Host "Dismounted '$StorageName' from host." -ForegroundColor Green
 }
 
