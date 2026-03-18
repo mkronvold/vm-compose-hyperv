@@ -25,7 +25,7 @@ vms:
     # product_key: "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"   # optional: activate + convert from Eval ISO to full edition
     # product_type: "WINDOWS SERVER 2022 STANDARD"    # required with product_key; used by DISM to set edition
     # product_notes: "use dism to convert from eval to retail"  # informational only
-    # admin_password: "YourPassword123"        # optional; if omitted a random 20-char password is generated and printed once
+    # admin_password: "YourPassword123"        # optional; used by health/getlog/exec/ssh to avoid prompts (lab use only — store securely in production)
     memory_gb: 8
     cpus: 4
     os_disk_gb: 80

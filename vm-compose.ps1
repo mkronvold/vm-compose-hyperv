@@ -978,6 +978,16 @@ function Get-VMDetails {
     $obj | Format-List
 }
 
+function Get-VMCredential {
+    param([string]$VmName)
+    $cfg = if ($stack -and $stack.vms) { $stack.vms[$VmName] } else { $null }
+    if ($cfg -and $cfg.admin_password) {
+        $secpw = ConvertTo-SecureString $cfg.admin_password -AsPlainText -Force
+        return New-Object PSCredential('administrator', $secpw)
+    }
+    return Get-Credential -UserName 'administrator' -Message "Enter password for '$VmName' (administrator)"
+}
+
 function Get-VMLogs {
     param($vmName)
     if (-not (Get-VM -Name $vmName -ErrorAction SilentlyContinue)) {
@@ -986,7 +996,7 @@ function Get-VMLogs {
     }
 
     Write-Host "=== Logs for $vmName ==="
-    Invoke-Command -VMName $vmName -ScriptBlock {
+    Invoke-Command -VMName $vmName -Credential (Get-VMCredential $vmName) -ScriptBlock {
         Get-EventLog -LogName Application -Newest 20
     }
 }
@@ -999,7 +1009,7 @@ function Invoke-VMCommand {
     }
 
     Write-Host "=== Executing on $vmName ==="
-    Invoke-Command -VMName $vmName -ScriptBlock { param($c) Invoke-Expression $c } -ArgumentList $cmd
+    Invoke-Command -VMName $vmName -Credential (Get-VMCredential $vmName) -ScriptBlock { param($c) Invoke-Expression $c } -ArgumentList $cmd
 }
 
 function Get-VMProcesses {
@@ -1011,7 +1021,7 @@ function Get-VMProcesses {
     }
 
     Write-Host "=== Processes in $vmName ==="
-    Invoke-Command -VMName $vmName -ScriptBlock {
+    Invoke-Command -VMName $vmName -Credential (Get-VMCredential $vmName) -ScriptBlock {
         Get-Process |
             Sort-Object CPU -Descending |
             Select-Object -First 25 Name, Id, CPU, WorkingSet |
@@ -1028,7 +1038,7 @@ function Enter-VM {
     }
 
     Write-Host "Opening PowerShell Direct session into $vmName..."
-    Enter-PSSession -VMName $vmName
+    Enter-PSSession -VMName $vmName -Credential (Get-VMCredential $vmName)
 }
 
 function Get-VMIpAddress {
@@ -1101,7 +1111,7 @@ function Test-AllVMs {
         }
 
         try {
-            $checks = Invoke-Command -VMName $vm -ScriptBlock {
+            $checks = Invoke-Command -VMName $vm -Credential (Get-VMCredential $vm) -ScriptBlock {
                 # Ensure Docker binary path is in PATH for this session
                 $dockerBin = 'C:\Program Files\Docker'
                 if ($env:Path -notlike "*$dockerBin*") { $env:Path = "$env:Path;$dockerBin" }
@@ -1556,7 +1566,7 @@ function Invoke-VMCopy {
         if (-not (Get-VM -Name $vmName -ErrorAction SilentlyContinue)) {
             Write-Host "VM '$vmName' not found." -ForegroundColor Red; return
         }
-        $cred = Get-Credential -UserName "Administrator" -Message "Enter Administrator password for '$vmName'"
+        $cred = Get-VMCredential $vmName
         if (-not $cred) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
         Write-Host "Copying ${vmName}:$vmPath → '$destPath'"
@@ -1772,7 +1782,7 @@ switch ($Command) {
         } elseif (-not $logType) {
             # List mode: show each log and whether it exists on the VM
             Write-Host "=== Logs available on $vmTarget ===" -ForegroundColor Cyan
-            $checks = Invoke-Command -VMName $vmTarget -ScriptBlock {
+            $checks = Invoke-Command -VMName $vmTarget -Credential (Get-VMCredential $vmTarget) -ScriptBlock {
                 param($logs)
                 $logs.GetEnumerator() | ForEach-Object {
                     $p = $_.Value.Path
