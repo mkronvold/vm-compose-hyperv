@@ -1080,12 +1080,16 @@ function Test-AllVMs {
 
         try {
             $checks = Invoke-Command -VMName $vm -ScriptBlock {
-                $ok  = [char]0x2713  # ✓
-                $bad = [char]0x2717  # ✗
+                # Ensure Docker binary path is in PATH for this session
+                $dockerBin = 'C:\Program Files\Docker'
+                if ($env:Path -notlike "*$dockerBin*") { $env:Path = "$env:Path;$dockerBin" }
 
-                # Docker
-                $dockerVer = & docker info --format '{{.ServerVersion}}' 2>$null
-                $dockerOk  = $LASTEXITCODE -eq 0 -and $dockerVer
+                # Docker — catch CommandNotFoundException so it doesn't bubble to outer catch
+                $dockerVer = $null; $dockerOk = $false
+                try {
+                    $dockerVer = & docker info --format '{{.ServerVersion}}' 2>$null
+                    $dockerOk  = $LASTEXITCODE -eq 0 -and $dockerVer
+                } catch { }
 
                 # Containers feature
                 $feature = (Get-WindowsFeature -Name Containers -ErrorAction SilentlyContinue).InstallState -eq 'Installed'
