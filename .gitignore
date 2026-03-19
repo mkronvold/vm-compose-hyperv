@@ -50,3 +50,4 @@ vmstack.yaml
 
 # Generated service wrapper scripts
 *-svc-wrapper.ps1
+solr.md
