@@ -1,0 +1,50 @@
+# vm-lib.ps1 — shared Hyper-V storage helpers
+# Used by vm-compose.ps1 (dot-sourced) and vm-dashboard.ps1 (via Use-PodeScript)
+
+# Walk the VHD parent chain from DiskPath up to 10 levels.
+# Returns $true if TargetPath appears anywhere in the chain (handles .avhdx when VM has checkpoints).
+function Test-VHDIsInChain {
+    param([string]$DiskPath, [string]$TargetPath)
+    $p = $DiskPath  -replace '/', '\'
+    $t = $TargetPath -replace '/', '\'
+    if ($p -ieq $t) { return $true }
+    $v = Get-VHD -Path $p -ErrorAction SilentlyContinue; $i = 0
+    while ($v -and $v.VhdType -eq 'Differencing' -and $v.ParentPath -and $i -lt 10) {
+        $p = $v.ParentPath -replace '/', '\'
+        if ($p -ieq $t) { return $true }
+        $v = Get-VHD -Path $p -ErrorAction SilentlyContinue; $i++
+    }
+    $false
+}
+
+# Return names of all VMs that have StoragePath anywhere in any disk's VHD chain.
+function Get-VMsWithDisk {
+    param([string]$StoragePath)
+    $sp = $StoragePath -replace '/', '\'
+    @(Get-VM -ErrorAction SilentlyContinue |
+        Where-Object {
+            (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue |
+                Where-Object { Test-VHDIsInChain $_.Path $sp })
+        } |
+        Select-Object -ExpandProperty Name)
+}
+
+# Return the VMHardDiskDrive object for VmName whose VHD chain includes StoragePath, or $null.
+function Get-VMDiskForPath {
+    param([string]$VmName, [string]$StoragePath)
+    $sp = $StoragePath -replace '/', '\'
+    foreach ($d in @(Get-VMHardDiskDrive -VMName $VmName -ErrorAction SilentlyContinue)) {
+        if (Test-VHDIsInChain $d.Path $sp) { return $d }
+    }
+    $null
+}
+
+# Test whether StoragePath is currently mounted on the host as a local disk.
+# Uses Get-Disk by Location (more reliable than Get-VHD when VMMS holds the file handle).
+function Test-StorageMountedOnHost {
+    param([string]$StoragePath)
+    $sp = $StoragePath -replace '/', '\'
+    $null -ne (Get-Disk -ErrorAction SilentlyContinue |
+        Where-Object { ($_.Location -replace '/', '\') -ieq $sp } |
+        Select-Object -First 1)
+}

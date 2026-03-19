@@ -54,6 +54,76 @@ Start-PodeServer -Threads 2 {
     # Share modules and config path with all route runspaces
     Set-PodeState -Name 'ConfigFile' -Value $ConfigFile
 
+    # Load shared VHD/storage helper functions into all route runspaces
+    Use-PodeScript (Join-Path $PSScriptRoot 'vm-lib.ps1')
+
+    # -------------------------------------------------------
+    # Background timer: refresh Docker stats for all VMs every 10 s.
+    # Results are cached in Pode state so the route returns instantly,
+    # preventing concurrent Invoke-Command calls that race on
+    # Pode's internal GetNewClosure() and cause NullReferenceExceptions.
+    # -------------------------------------------------------
+    Add-PodeTimer -Name 'DockerStatsPoller' -Interval 10 -ScriptBlock {
+        try {
+            Import-Module powershell-yaml -ErrorAction Stop
+            $cfgFile = Get-PodeState -Name 'ConfigFile'
+            if (-not $cfgFile) { return }
+            $stack = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
+            if (-not $stack) { return }
+            foreach ($vmName in $stack.vms.Keys) {
+                $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+                if (-not $vm -or $vm.State -ne 'Running') { continue }
+                $vmCfg = $stack.vms[$vmName]
+                $cred  = $null
+                if ($vmCfg -and $vmCfg.admin_password) {
+                    $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
+                    $cred  = New-Object PSCredential('administrator', $secpw)
+                }
+                $icArgs = @{
+                    VMName      = $vmName
+                    ErrorAction = 'Stop'
+                    ScriptBlock = {
+                        if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+                            return '{"dockerInstalled":false,"containers":[],"pvTotalGB":null,"pvFreeGB":null}'
+                        }
+                        $ps = @(& docker ps -a --format '{{json .}}' 2>$null)
+                        $statsJob = Start-Job { & docker stats --no-stream --format '{{json .}}' 2>$null }
+                        $null = Wait-Job $statsJob -Timeout 6
+                        $sts = @(Receive-Job $statsJob 2>$null)
+                        Remove-Job $statsJob -Force -ErrorAction SilentlyContinue
+                        $sm = @{}
+                        foreach ($s in $sts) {
+                            try { $o = $s | ConvertFrom-Json; if ($o.Name) { $sm[$o.Name] = $o } } catch {}
+                        }
+                        $pvDisk = Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='P:'" -ErrorAction SilentlyContinue
+                        $out = [System.Collections.Generic.List[object]]::new()
+                        foreach ($line in $ps) {
+                            try {
+                                $c = $line | ConvertFrom-Json
+                                $cpu = '0%'; $mem = '0B / 0B'
+                                if ($c -and $c.State -eq 'running' -and $c.Names -and $sm.ContainsKey($c.Names)) {
+                                    $cpu = $sm[$c.Names].CPUPerc; $mem = $sm[$c.Names].MemUsage
+                                }
+                                if ($c) { $out.Add([PSCustomObject]@{ name=$c.Names; image=$c.Image; status=$c.Status; state=$c.State; cpu=$cpu; mem=$mem; ports=$c.Ports; id=$c.ID }) }
+                            } catch {}
+                        }
+                        $pvTotal = if ($pvDisk) { [math]::Round($pvDisk.Size / 1GB, 1) } else { $null }
+                        $pvFree  = if ($pvDisk) { [math]::Round($pvDisk.FreeSpace / 1GB, 2) } else { $null }
+                        return ([PSCustomObject]@{ dockerInstalled=$true; containers=$out.ToArray(); pvTotalGB=$pvTotal; pvFreeGB=$pvFree } | ConvertTo-Json -Compress -Depth 5)
+                    }
+                }
+                if ($cred) { $icArgs.Credential = $cred }
+                try {
+                    $raw = Invoke-Command @icArgs
+                    $json = if ($raw -is [array]) { $raw | Where-Object { $_ -is [string] } | Select-Object -Last 1 } else { [string]$raw }
+                    if ($json) { Set-PodeState -Name "DockerCache_$vmName" -Value $json }
+                } catch {
+                    # Keep stale cache on error; don't overwrite good data with an error
+                }
+            }
+        } catch {}
+    }
+
     # -------------------------------------------------------
     # GET / — dashboard
     # -------------------------------------------------------
@@ -62,6 +132,8 @@ Start-PodeServer -Threads 2 {
             Import-Module powershell-yaml -ErrorAction Stop
             $cfgFile = Get-PodeState -Name 'ConfigFile'
             $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
+            $flashMsg = if ($WebEvent.Query.ContainsKey('flash')) { [uri]::UnescapeDataString($WebEvent.Query['flash']) } else { '' }
+            $flashAlert = if ($flashMsg) { "<div class='alert alert-danger alert-dismissible fade show' role='alert'><strong>Error:</strong> $([System.Net.WebUtility]::HtmlEncode($flashMsg))<button type='button' class='btn-close' data-bs-dismiss='alert'></button></div>" } else { '' }
 
             $rows = ""
             foreach ($vmName in $stack.vms.Keys) {
@@ -116,66 +188,135 @@ Start-PodeServer -Threads 2 {
 "@
             }
 
-            # Build shared storage rows
+            # Build unified storage table (shared storage + persistent volumes)
             $vmRoot = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
+            $vmRootPrefix = $vmRoot.TrimEnd('\') + '\'
             $storageRows = ""
+
+            # Helper: compute disk size/alloc/hostDrive from a vhdx path
+            # Returns hashtable: usedGB, pctAlloc, diskNum, hostDrive
+            function Get-VHDStats {
+                param([string]$sp)
+                $r = @{ usedGB = '-'; pctAlloc = '-'; diskNum = $null; hostDrive = '-' }
+                if (-not (Test-Path $sp)) { return $r }
+                $r.usedGB = [math]::Round((Get-Item $sp).Length / 1GB, 2)
+                $vhd = Get-VHD -Path $sp -ErrorAction SilentlyContinue
+                if ($vhd -and $vhd.Size -gt 0) { $r.pctAlloc = '{0:0}%' -f ($vhd.FileSize / $vhd.Size * 100) }
+                $dnStr = "$($vhd.DiskNumber)"
+                if ($vhd -and $vhd.Attached -and $dnStr -match '^\d+$') { $r.diskNum = [int]$dnStr }
+                if ($null -eq $r.diskNum) {
+                    $hd = Get-Disk -ErrorAction SilentlyContinue | Where-Object { ($_.Location -replace '/', '\') -ieq $sp } | Select-Object -First 1
+                    if ($hd) { $r.diskNum = [int]$hd.Number }
+                }
+                if ($null -ne $r.diskNum) {
+                    $dl = Get-Disk -Number $r.diskNum -ErrorAction SilentlyContinue |
+                          Get-Partition -ErrorAction SilentlyContinue |
+                          Where-Object { $_.DriveLetter -and $_.DriveLetter -ne [char]0 } |
+                          Select-Object -First 1 -ExpandProperty DriveLetter
+                    $r.hostDrive = if ($dl) { "${dl}:\" } else { "Attached" }
+                }
+                $r
+            }
+
+            # Helper: build the Actions dropdown cell for a storage item
+            function Get-StorageActions {
+                param([string]$hostDrive, [string[]]$mountedVMs, [hashtable]$routes)
+                # $routes keys: localmount, localunmount, vmount_prefix (base url, vmname appended), vunmount_prefix, driveLetter
+                if ($hostDrive -ne '-') {
+                    return "<form method='post' action='$($routes.localunmount)' style='display:inline'><button class='btn btn-sm btn-warning'>&#x23CF; Unmount from Host</button></form>"
+                }
+                if ($mountedVMs.Count -gt 0) {
+                    $ddItems = ""
+                    foreach ($vn in $mountedVMs) {
+                        $url = if ($routes.vunmount_prefix) { "$($routes.vunmount_prefix)$vn" } else { $routes.vunmount }
+                        $ddItems += "<li><form method='post' action='$url' style='margin:0'><button type='submit' class='dropdown-item'>&#x23CF; Detach from VM: $vn</button></form></li>"
+                    }
+                    $ddItems += "<li><hr class='dropdown-divider'></li>"
+                    $ddItems += "<li><form method='post' action='$($routes.localmount)' style='margin:0'><button type='submit' class='dropdown-item'>&#x1F5A5; Move to Host ($($routes.driveLetter):)</button></form></li>"
+                    return "<div class='btn-group'><button type='button' class='btn btn-sm btn-outline-warning dropdown-toggle' data-bs-toggle='dropdown'>&#x23CF; Detach / Move</button><ul class='dropdown-menu'>$ddItems</ul></div>"
+                }
+                # Neither — show Mount dropdown
+                $ddItems = "<li><form method='post' action='$($routes.localmount)' style='margin:0'><button type='submit' class='dropdown-item'>&#x1F5A5; Mount on Host ($($routes.driveLetter):)</button></form></li>"
+                foreach ($vn in $routes.vmsForMount) {
+                    $url = if ($routes.vmount_prefix) { "$($routes.vmount_prefix)$vn" } else { $routes.vmount }
+                    $ddItems += "<li><form method='post' action='$url' style='margin:0'><button type='submit' class='dropdown-item'>&#x1F4BB; Add to VM: $vn</button></form></li>"
+                }
+                return "<div class='btn-group'><button type='button' class='btn btn-sm btn-outline-primary dropdown-toggle' data-bs-toggle='dropdown'>&#x1F4BE; Mount</button><ul class='dropdown-menu'>$ddItems</ul></div>"
+            }
+
+            # ---- Shared storage rows ----
             if ($stack.storage) {
                 foreach ($storageName in $stack.storage.Keys) {
-                    $sCfg = $stack.storage[$storageName]
+                    $sCfg    = $stack.storage[$storageName]
                     $rawPath = $sCfg.path
-                    $sp = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
-                    $virtGB   = $sCfg.size_gb
-                    $usedGB   = '-'
-                    $pctAlloc = '-'
-                    $hostDrive = '-'
-                    $mountBtn  = ''
-                    $mountedVMsArray = @(
-                        Get-VM -ErrorAction SilentlyContinue |
-                            Where-Object { (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue |
-                                Where-Object Path -eq $sp) } |
-                            Select-Object -ExpandProperty Name
-                    )
-                    $mountedVMs = $mountedVMsArray -join ', '
-                    if (-not $mountedVMs) { $mountedVMs = '-' }
+                    $sp      = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
+                    $sp      = $sp -replace '/', '\'
+                    $spShort = if ($sp.StartsWith($vmRootPrefix, [StringComparison]::OrdinalIgnoreCase)) { $sp.Substring($vmRootPrefix.Length) } else { $sp }
+                    $virtGB  = $sCfg.size_gb
+                    $vmsForStorage = @($stack.vms.Keys | Where-Object { $stack.vms[$_].mount -contains $storageName })
+                    $mountedVMsArray = @(Get-VMsWithDisk $sp)
 
                     if (Test-Path $sp) {
-                        $usedGB = [math]::Round((Get-Item $sp).Length / 1GB, 2)
-                        $vhd = Get-VHD -Path $sp -ErrorAction SilentlyContinue
-                        if ($vhd -and $vhd.Size -gt 0) {
-                            $pctAlloc = '{0:0}%' -f ($vhd.FileSize / $vhd.Size * 100)
-                        }
-                        $diskNum = $null; $dnStr = "$($vhd.DiskNumber)"
-                        if ($vhd -and $vhd.Attached -and $dnStr -match '^\d+$') { $diskNum = [int]$dnStr }
-                        # Get-VHD throws a permission error when the disk is host-mounted (VMMS locks it).
-                        # Fall back to Get-Disk by Location to detect host mounts reliably.
-                        if ($null -eq $diskNum) {
-                            $hostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $sp }
-                            if ($hostDisk) { $diskNum = [int]$hostDisk.Number }
-                        }
-                        if ($null -ne $diskNum) {
-                            $dl = Get-Disk -Number $diskNum -ErrorAction SilentlyContinue |
-                                  Get-Partition -ErrorAction SilentlyContinue |
-                                  Where-Object { $_.DriveLetter -and $_.DriveLetter -ne [char]0 } |
-                                  Select-Object -First 1 -ExpandProperty DriveLetter
-                            $hostDrive = if ($dl) { "${dl}:\" } else { "Attached" }
-                            $mountBtn  = "<form method='post' action='/storage/$storageName/localunmount' style='display:inline'><button class='btn btn-sm btn-warning'>&#x23CF; Unmount</button></form>"
+                        $stats = Get-VHDStats $sp
+                        $mountedDisplay = if ($stats.hostDrive -ne '-') {
+                            "<span class='badge bg-info text-dark'>Host: $($stats.hostDrive)</span>"
                         } elseif ($mountedVMsArray.Count -gt 0) {
-                            $mountBtn  = "<button class='btn btn-sm btn-outline-secondary' disabled title='Unmount from VM first'>&#x1F512; In use by VM</button>"
-                        } else {
-                            $mountBtn  = "<form method='post' action='/storage/$storageName/localmount' style='display:inline'><button class='btn btn-sm btn-outline-primary'>&#x1F4BE; Mount</button></form>"
-                        }
-                    } else {
-                        $mountBtn = "<span class='badge bg-danger'>MISSING</span>"
-                    }
+                            ($mountedVMsArray | ForEach-Object { "<span class='badge bg-success'>$_</span>" }) -join ' '
+                        } else { '-' }
 
-                    $storageRows += "<tr><td><strong>$storageName</strong></td><td><code class='small'>$sp</code></td><td>${virtGB} GB</td><td>${usedGB} GB</td><td>$pctAlloc</td><td>$mountedVMs</td><td>$hostDrive</td><td>$mountBtn</td></tr>"
+                        $actionBtn = Get-StorageActions -hostDrive $stats.hostDrive -mountedVMs $mountedVMsArray -routes @{
+                            localmount    = "/storage/$storageName/localmount"
+                            localunmount  = "/storage/$storageName/localunmount"
+                            vmount_prefix = "/storage/$storageName/vmount/"
+                            vunmount_prefix = "/storage/$storageName/vunmount/"
+                            vmsForMount   = $vmsForStorage
+                            driveLetter   = 'S'
+                        }
+                        $storageRows += "<tr><td><strong>$storageName</strong></td><td><code class='small'>$spShort</code></td><td>$($virtGB) GB</td><td>$($stats.usedGB) GB</td><td>$($stats.pctAlloc)</td><td>$mountedDisplay</td><td>$actionBtn</td></tr>"
+                    } else {
+                        $storageRows += "<tr><td><strong>$storageName</strong></td><td><code class='small'>$spShort</code></td><td>$($virtGB) GB</td><td>-</td><td>-</td><td>-</td><td><span class='badge bg-danger'>MISSING</span></td></tr>"
+                    }
                 }
             }
+
+            # ---- Persistent volume rows ----
+            foreach ($pvVmName in $stack.vms.Keys) {
+                $vmCfg = $stack.vms[$pvVmName]
+                if (-not $vmCfg.persistent_disk_gb) { continue }
+                $pvPath  = (Join-Path $vmRoot $pvVmName "persistent-storage.vhdx") -replace '/', '\'
+                $pvShort = if ($pvPath.StartsWith($vmRootPrefix, [StringComparison]::OrdinalIgnoreCase)) { $pvPath.Substring($vmRootPrefix.Length) } else { $pvPath }
+                $virtGB  = $vmCfg.persistent_disk_gb
+                $mountedVMsArray = @(Get-VMsWithDisk $pvPath)
+
+                if (Test-Path $pvPath) {
+                    $stats = Get-VHDStats $pvPath
+                    $mountedDisplay = if ($stats.hostDrive -ne '-') {
+                        "<span class='badge bg-info text-dark'>Host: $($stats.hostDrive)</span>"
+                    } elseif ($mountedVMsArray.Count -gt 0) {
+                        ($mountedVMsArray | ForEach-Object { "<span class='badge bg-success'>$_</span>" }) -join ' '
+                    } else { '-' }
+
+                    $actionBtn = Get-StorageActions -hostDrive $stats.hostDrive -mountedVMs $mountedVMsArray -routes @{
+                        localmount   = "/vm/$pvVmName/pv/localmount"
+                        localunmount = "/vm/$pvVmName/pv/localunmount"
+                        vmount_prefix = $null
+                        vmount       = "/vm/$pvVmName/pv/vmount"
+                        vunmount_prefix = $null
+                        vunmount     = "/vm/$pvVmName/pv/vunmount"
+                        vmsForMount  = @($pvVmName)
+                        driveLetter  = 'P'
+                    }
+                    $storageRows += "<tr><td><strong>$pvVmName</strong> <span class='badge bg-secondary'>PV</span></td><td><code class='small'>$pvShort</code></td><td>$($virtGB) GB</td><td>$($stats.usedGB) GB</td><td>$($stats.pctAlloc)</td><td>$mountedDisplay</td><td>$actionBtn</td></tr>"
+                } else {
+                    $storageRows += "<tr><td><strong>$pvVmName</strong> <span class='badge bg-secondary'>PV</span></td><td><code class='small'>$pvShort</code></td><td>$($virtGB) GB</td><td>-</td><td>-</td><td>-</td><td><span class='badge bg-danger'>MISSING</span></td></tr>"
+                }
+            }
+
             $storageSection = if ($storageRows) { @"
-<h4 class="mt-4">&#x1F4BE; Shared Storage</h4>
+<h4 class="mt-4">&#x1F4BE; Storage</h4>
 <table class="table table-sm table-bordered bg-white shadow-sm">
   <thead class="table-dark">
-    <tr><th>Name</th><th>Path</th><th>Virtual</th><th>On Disk</th><th>%Alloc</th><th>VM Mounts</th><th>Host Drive</th><th></th></tr>
+    <tr><th>Name</th><th>Path</th><th>Virtual</th><th>On Disk</th><th>%Alloc</th><th>Mounted</th><th>Actions</th></tr>
   </thead>
   <tbody>$storageRows</tbody>
 </table>
@@ -192,6 +333,7 @@ Start-PodeServer -Threads 2 {
 </head>
 <body class="bg-light">
 <div class="container mt-4">
+  $flashAlert
   <h1 class="mb-1">&#x1F5A5; Hyper-V Compose</h1>
   <p class="text-muted mb-3">Auto-refreshes every 10 seconds</p>
   <table class="table table-bordered table-hover bg-white shadow-sm">
@@ -203,6 +345,7 @@ Start-PodeServer -Threads 2 {
   $storageSection
   <p class="text-muted small">Metrics: <a href="http://localhost:9090/metrics" target="_blank">http://localhost:9090/metrics</a></p>
 </div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
 "@
@@ -252,17 +395,6 @@ $($_.ScriptStackTrace)</pre>
                 "Paused"  { "warning" } default { "danger" }
             }
             $ips      = @($adapters.IPAddresses | Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' })
-            $diskList = ($disks | ForEach-Object {
-                $dPath = $_.Path
-                $vhd = Get-VHD -Path $dPath -ErrorAction SilentlyContinue
-                $sizeInfo = if ($vhd -and $vhd.Size -gt 0) {
-                    $v = [math]::Round($vhd.Size / 1GB, 1)
-                    $u = [math]::Round($vhd.FileSize / 1GB, 2)
-                    $p = '{0:0}' -f ($vhd.FileSize / $vhd.Size * 100)
-                    " &nbsp;<span class='badge bg-secondary'>${v} GB</span> <span class='text-muted small'>${u} GB used (${p}%)</span>"
-                } else { "" }
-                "<li class='list-group-item small'><code>$dPath</code>$sizeInfo</li>"
-            }) -join ""
             $ipList   = ($ips        | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
             $snapList = ($snaps.Name | ForEach-Object { "<li class='list-group-item'>$_</li>" }) -join ""
             $macList  = ($adapters | ForEach-Object {
@@ -273,25 +405,90 @@ $($_.ScriptStackTrace)</pre>
                 "<li class='list-group-item'>$($_.SwitchName)&nbsp;<span class='text-muted small'>$($_.Name)</span></li>"
             }) -join ""
 
-            # Persistent volume (P:) on the host — detect if VHDX is host-mounted
-            $pvPath   = Join-Path $vmRoot $vmName "persistent-storage.vhdx"
-            $pvExists = Test-Path $pvPath
-            $pvSection = ""
-            if ($pvExists) {
-                $pvHostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $pvPath } | Select-Object -First 1
-                if ($pvHostDisk) {
-                    $pvDriveLetter = Get-Disk -Number $pvHostDisk.Number -ErrorAction SilentlyContinue |
-                        Get-Partition -ErrorAction SilentlyContinue |
-                        Where-Object { $_.DriveLetter -and $_.DriveLetter -ne [char]0 } |
-                        Select-Object -First 1 -ExpandProperty DriveLetter
-                    $pvDriveLabel = if ($pvDriveLetter) { "${pvDriveLetter}:\" } else { "Attached (no letter)" }
-                    $pvSection = "<div class='card mb-3 border-warning'><div class='card-header bg-warning text-dark fw-bold'>&#x1F4BE; Persistent Volume (host-mounted: $pvDriveLabel)</div><div class='card-body d-flex align-items-center gap-3'><code class='small'>$pvPath</code><button type='button' class='btn btn-sm btn-danger ms-auto' data-bs-toggle='modal' data-bs-target='#pvUnmountModal'>&#x23CF; Unmount</button></div></div><div class='modal fade' id='pvUnmountModal' tabindex='-1'><div class='modal-dialog'><div class='modal-content'><div class='modal-header'><h5 class='modal-title'>Unmount Persistent Volume?</h5><button type='button' class='btn-close' data-bs-dismiss='modal'></button></div><div class='modal-body'><p class='text-danger fw-bold'>Warning: unmounting while Docker containers are running on this VM may cause data loss or container crashes.</p><p>Are you sure you want to unmount <code>$pvPath</code> from the host?</p></div><div class='modal-footer'><button type='button' class='btn btn-secondary' data-bs-dismiss='modal'>Cancel</button><form method='post' action='/vm/$vmName/pv/localunmount' style='display:inline'><button class='btn btn-danger'>Unmount</button></form></div></div></div></div>"
-                } else {
-                    $pvVhd = Get-VHD -Path $pvPath -ErrorAction SilentlyContinue
-                    $pvGB  = if ($pvVhd -and $pvVhd.Size -gt 0) { [math]::Round($pvVhd.Size / 1GB, 1) } else { '?' }
-                    $pvSection = "<div class='card mb-3'><div class='card-header fw-bold'>&#x1F4BE; Persistent Volume ($pvGB GB)</div><div class='card-body d-flex align-items-center gap-3'><code class='small'>$pvPath</code><form method='post' action='/vm/$vmName/pv/localmount' style='display:inline' class='ms-auto'><button class='btn btn-sm btn-outline-primary'>&#x1F4E5; Mount on Host (P:)</button></form></div></div>"
+            # Build disk table (merges VM disks + persistent volume mount controls)
+            $vmRootPrefix = $vmRoot.TrimEnd('\') + '\'
+            $pvPath = Join-Path $vmRoot $vmName "persistent-storage.vhdx"
+            # Build shared storage path map
+            $sharedPathMap = @{}
+            if ($stack.storage) {
+                foreach ($sn in $stack.storage.Keys) {
+                    $rp = $stack.storage[$sn].path
+                    $sPath = if ([System.IO.Path]::IsPathRooted($rp)) { $rp } else { Join-Path $vmRoot $rp }
+                    $sPath = $sPath -replace '/', '\'
+                    $sharedPathMap[$sPath.ToLower()] = $sn
                 }
             }
+            $hasPvDisk = $false
+            $diskTableRows = ($disks | ForEach-Object {
+                $rawDiskPath = $_.Path
+                # Walk VHD chain to base (resolve .avhdx differencing disk -> root .vhdx)
+                $basePath = $rawDiskPath
+                $baseVhd  = Get-VHD -Path $rawDiskPath -ErrorAction SilentlyContinue
+                $itr = 0
+                while ($baseVhd -and $baseVhd.VhdType -eq 'Differencing' -and $baseVhd.ParentPath -and $itr -lt 10) {
+                    $basePath = $baseVhd.ParentPath
+                    $baseVhd  = Get-VHD -Path $basePath -ErrorAction SilentlyContinue
+                    $itr++
+                }
+                $basePath = $basePath -replace '/', '\'  # normalize separators for consistent comparison
+                $shortPath = if ($basePath.StartsWith($vmRootPrefix, [StringComparison]::OrdinalIgnoreCase)) { $basePath.Substring($vmRootPrefix.Length) } else { $basePath }
+
+                # Determine disk role
+                $diskRole = 'OS Disk'
+                if ($basePath -ieq $pvPath) {
+                    $diskRole = 'Persistent Volume'
+                } elseif ($sharedPathMap.ContainsKey($basePath.ToLower())) {
+                    $diskRole = "SharedData: $($sharedPathMap[$basePath.ToLower()])"
+                }
+
+                # Size info from base VHD
+                $vSizeGB = '-'; $uSizeGB = '-'; $pctStr = '-'
+                if ($baseVhd -and $baseVhd.Size -gt 0) {
+                    $vSizeGB = "$([math]::Round($baseVhd.Size / 1GB, 1)) GB"
+                    $uSizeGB = "$([math]::Round($baseVhd.FileSize / 1GB, 2)) GB"
+                    $pctStr  = '{0:0}%' -f ($baseVhd.FileSize / $baseVhd.Size * 100)
+                }
+
+                $statusCell  = "<span class='badge bg-info'>VM attached</span>"
+                $actionsCell = ''
+
+                if ($diskRole -eq 'Persistent Volume') {
+                    $script:hasPvDisk = $true
+                    $pvHostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $basePath } | Select-Object -First 1
+                    if ($pvHostDisk) {
+                        $pvDl = Get-Disk -Number $pvHostDisk.Number -ErrorAction SilentlyContinue |
+                            Get-Partition -ErrorAction SilentlyContinue |
+                            Where-Object { $_.DriveLetter -and $_.DriveLetter -ne [char]0 } |
+                            Select-Object -First 1 -ExpandProperty DriveLetter
+                        $pvLabel = if ($pvDl) { "${pvDl}:\" } else { "Attached" }
+                        $statusCell  = "<span class='badge bg-warning text-dark'>Host: $pvLabel</span>"
+                        $actionsCell = "<button type='button' class='btn btn-sm btn-danger' data-bs-toggle='modal' data-bs-target='#pvUnmountModal'>&#x23CF; Unmount from Host</button>"
+                    } else {
+                        $actionsCell = @"
+<form method='post' action='/vm/$vmName/pv/vunmount' style='display:inline'>
+  <button class='btn btn-sm btn-outline-secondary' onclick="return confirm('Detach persistent volume from this VM?')">&#x23CF; Detach</button>
+</form>
+<form method='post' action='/vm/$vmName/pv/localmount' style='display:inline'>
+  <button class='btn btn-sm btn-outline-primary' onclick="return confirm('Detach persistent volume from VM and mount on host (P:)?')">&#x1F5A5; Move to Host</button>
+</form>
+"@
+                    }
+                } elseif ($diskRole -like 'SharedData: *') {
+                    $sn = $diskRole.Substring(12)  # strip 'SharedData: ' prefix
+                    $actionsCell = @"
+<form method='post' action='/storage/$sn/vunmount/$vmName' style='display:inline'>
+  <button class='btn btn-sm btn-outline-secondary' onclick="return confirm('Detach $sn from this VM?')">&#x23CF; Detach</button>
+</form>
+<form method='post' action='/storage/$sn/localmount' style='display:inline'>
+  <button class='btn btn-sm btn-outline-primary' onclick="return confirm('Detach $sn from this VM and mount on host (S:)?')">&#x1F5A5; Move to Host</button>
+</form>
+"@
+                }
+
+                "<tr><td>$diskRole</td><td><code class='small'>$shortPath</code></td><td>$vSizeGB</td><td>$uSizeGB</td><td>$pctStr</td><td>$statusCell</td><td>$actionsCell</td></tr>"
+            }) -join ""
+
+            $pvUnmountModal = if ($hasPvDisk) { "<div class='modal fade' id='pvUnmountModal' tabindex='-1'><div class='modal-dialog'><div class='modal-content'><div class='modal-header'><h5 class='modal-title'>Unmount Persistent Volume?</h5><button type='button' class='btn-close' data-bs-dismiss='modal'></button></div><div class='modal-body'><p class='text-danger fw-bold'>Warning: unmounting while Docker containers are running may cause data loss or container crashes.</p></div><div class='modal-footer'><button type='button' class='btn btn-secondary' data-bs-dismiss='modal'>Cancel</button><form method='post' action='/vm/$vmName/pv/localunmount' style='display:inline'><button class='btn btn-danger'>Unmount</button></form></div></div></div></div>" } else { "" }
 
             Write-PodeHtmlResponse -Value @"
 <!doctype html>
@@ -321,18 +518,24 @@ $($_.ScriptStackTrace)</pre>
         <form method="post" action="/vm/$vmName/stop">   <button class="btn btn-warning">Stop</button></form>
         <form method="post" action="/vm/$vmName/restart"><button class="btn btn-info">Restart</button></form>
       </div>
-      $pvSection
     </div>
     <div class="col-md-8">
       <h5>IP Addresses</h5><ul class="list-group mb-3">$(if ($ipList) { $ipList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
       <h5>MAC Addresses</h5><ul class="list-group mb-3">$(if ($macList) { $macList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
       <h5>Switches</h5><ul class="list-group mb-3">$(if ($swList) { $swList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
-      <h5>Disks</h5><ul class="list-group mb-3">$(if ($diskList) { $diskList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
       <h5>Checkpoints</h5><ul class="list-group mb-3">$(if ($snapList) { $snapList } else { '<li class="list-group-item text-muted">None</li>' })</ul>
       $(if ($vm.Notes) { "<h5>Notes</h5><pre class='bg-white p-2 border rounded'>$($vm.Notes)</pre>" })
     </div>
   </div>
+  <h5 class="mt-2">Disks</h5>
+  <table class="table table-sm table-bordered bg-white shadow-sm">
+    <thead class="table-dark">
+      <tr><th>Role</th><th>Path</th><th>Virtual Size</th><th>On Disk</th><th>% Alloc</th><th>Status</th><th></th></tr>
+    </thead>
+    <tbody>$(if ($diskTableRows) { $diskTableRows } else { '<tr><td colspan="7" class="text-muted">No disks</td></tr>' })</tbody>
+  </table>
 </div>
+$pvUnmountModal
 </body>
 </html>
 "@
@@ -342,8 +545,26 @@ $($_.ScriptStackTrace)</pre>
     }
 
     # -------------------------------------------------------
-    # POST /vm/:name/pv/localmount|localunmount
+    # POST /vm/:name/pv/vmount|localmount|localunmount|vunmount
     # -------------------------------------------------------
+    Add-PodeRoute -Method Post -Path "/vm/:name/pv/vmount" -ScriptBlock {
+        try {
+            Import-Module powershell-yaml -ErrorAction Stop
+            $vmName  = $WebEvent.Parameters['name']
+            $cfgFile = Get-PodeState -Name 'ConfigFile'
+            $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
+            $vmRoot  = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
+            $pvPath  = (Join-Path $vmRoot $vmName "persistent-storage.vhdx") -replace '/', '\'
+            if (-not (Test-Path $pvPath)) { throw "VHDX not found: $pvPath" }
+            $hostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { ($_.Location -replace '/', '\') -ieq $pvPath } | Select-Object -First 1
+            if ($hostDisk) { throw "PV is currently mounted on the host. Unmount it first." }
+            if (-not (Get-VMDiskForPath -VmName $vmName -StoragePath $pvPath)) {
+                Add-VMHardDiskDrive -VMName $vmName -Path $pvPath -ErrorAction Stop
+            }
+        } catch { }
+        Move-PodeResponseUrl -Url "/"
+    }
+
     Add-PodeRoute -Method Post -Path "/vm/:name/pv/localmount" -ScriptBlock {
         try {
             Import-Module powershell-yaml -ErrorAction Stop
@@ -351,8 +572,11 @@ $($_.ScriptStackTrace)</pre>
             $cfgFile = Get-PodeState -Name 'ConfigFile'
             $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
             $vmRoot  = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
-            $pvPath  = Join-Path $vmRoot $vmName "persistent-storage.vhdx"
+            $pvPath  = (Join-Path $vmRoot $vmName "persistent-storage.vhdx") -replace '/', '\'
             if (-not (Test-Path $pvPath)) { throw "VHDX not found: $pvPath" }
+            # Detach from VM if currently attached (handles .avhdx differencing disks)
+            $drive = Get-VMDiskForPath -VmName $vmName -StoragePath $pvPath
+            if ($drive) { Remove-VMHardDiskDrive -VMHardDiskDrive $drive -ErrorAction SilentlyContinue }
             $vhd  = Mount-VHD -Path $pvPath -PassThru -ErrorAction Stop
             $disk = Get-Disk -Number $vhd.DiskNumber
             if ($disk.IsOffline)  { Set-Disk -Number $vhd.DiskNumber -IsOffline $false }
@@ -363,7 +587,21 @@ $($_.ScriptStackTrace)</pre>
                 Select-Object -First 1
             if ($part) { $part | Set-Partition -NewDriveLetter 'P' }
         } catch { }
-        Move-PodeResponseUrl -Url "/vm/$($WebEvent.Parameters['name'])"
+        Move-PodeResponseUrl -Url "/"
+    }
+
+    Add-PodeRoute -Method Post -Path "/vm/:name/pv/vunmount" -ScriptBlock {
+        try {
+            Import-Module powershell-yaml -ErrorAction Stop
+            $vmName  = $WebEvent.Parameters['name']
+            $cfgFile = Get-PodeState -Name 'ConfigFile'
+            $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
+            $vmRoot  = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
+            $pvPath  = (Join-Path $vmRoot $vmName "persistent-storage.vhdx") -replace '/', '\'
+            $drive = Get-VMDiskForPath -VmName $vmName -StoragePath $pvPath
+            if ($drive) { Remove-VMHardDiskDrive -VMHardDiskDrive $drive -ErrorAction Stop }
+        } catch { }
+        Move-PodeResponseUrl -Url "/"
     }
 
     Add-PodeRoute -Method Post -Path "/vm/:name/pv/localunmount" -ScriptBlock {
@@ -381,7 +619,7 @@ $($_.ScriptStackTrace)</pre>
                 Dismount-VHD -Path $pvPath -ErrorAction Stop
             }
         } catch { }
-        Move-PodeResponseUrl -Url "/vm/$($WebEvent.Parameters['name'])"
+        Move-PodeResponseUrl -Url "/"
     }
 
     # -------------------------------------------------------
@@ -401,6 +639,7 @@ $($_.ScriptStackTrace)</pre>
                 if (-not $stack.storage[$storageName]) { continue }
                 $rawPath = $stack.storage[$storageName].path
                 $sp = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
+                $sp = $sp -replace '/', '\'
                 $vhd = Get-VHD -Path $sp -ErrorAction SilentlyContinue
                 $dnStr = "$($vhd.DiskNumber)"
                 if ($vhd -and $vhd.Attached -and $dnStr -match '^\d+$') {
@@ -435,6 +674,7 @@ $($_.ScriptStackTrace)</pre>
                 if (-not $stack.storage[$storageName]) { continue }
                 $rawPath = $stack.storage[$storageName].path
                 $sp = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
+                $sp = $sp -replace '/', '\'
                 $vhd = Get-VHD -Path $sp -ErrorAction SilentlyContinue
                 $dnStr = "$($vhd.DiskNumber)"
                 if ($vhd -and $vhd.Attached -and $dnStr -match '^\d+$') {
@@ -453,6 +693,7 @@ $($_.ScriptStackTrace)</pre>
     # POST /storage/:name/localmount|localunmount — host drive actions
     # -------------------------------------------------------
     Add-PodeRoute -Method Post -Path "/storage/:name/localmount" -ScriptBlock {
+        $routeError = $null
         try {
             Import-Module powershell-yaml -ErrorAction Stop
             $storageName = $WebEvent.Parameters['name']
@@ -461,21 +702,56 @@ $($_.ScriptStackTrace)</pre>
             $vmRoot   = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
             $rawPath  = $stack.storage[$storageName].path
             $sp       = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
+            $sp       = $sp -replace '/', '\'
 
-            $mountedVMs = @(
-                Get-VM -ErrorAction SilentlyContinue |
-                    Where-Object { (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue |
-                        Where-Object Path -eq $sp) } |
-                    Select-Object -ExpandProperty Name
-            )
-            if ($mountedVMs.Count -gt 0) { throw "Storage '$storageName' is attached to VM(s): $($mountedVMs -join ', ')" }
-
-            # Pick first available letter starting from S
             $letter = 'S','T','U','V','W','X','Y','Z','R','Q','P' |
                       Where-Object { -not (Test-Path "${_}:\") } | Select-Object -First 1
             if (-not $letter) { $letter = 'S' }
 
-            $vhd = Mount-VHD -Path $sp -PassThru -ErrorAction Stop
+            # Check if any VM currently has this disk attached (by base .vhdx, not differencing .avhdx)
+            $attachedVMNames = @(Get-VMsWithDisk $sp)
+
+            if ($attachedVMNames.Count -gt 0) {
+                # Detach from every VM and retry mount (VMMS can be slow to release the handle)
+                $vhd = $null; $lastMountErrMsg = '(unknown)'
+                for ($attempt = 0; $attempt -lt 15; $attempt++) {
+                    $attachedVMNames | ForEach-Object {
+                        $drive = Get-VMDiskForPath -VmName $_ -StoragePath $sp
+                        if ($drive) { Remove-VMHardDiskDrive -VMHardDiskDrive $drive -ErrorAction SilentlyContinue }
+                    }
+                    try {
+                        $vhd = Mount-VHD -Path $sp -PassThru -ErrorAction Stop
+                        break
+                    } catch {
+                        $lastMountErrMsg = $_.Exception.Message
+                        if ($attempt -lt 14) { Start-Sleep -Seconds 1 }
+                    }
+                }
+                if (-not $vhd) { throw "Mount-VHD failed after 15 attempts: $lastMountErrMsg" }
+            } else {
+                # No VM has the disk — check for file lock (vmwp.exe still releasing handle)
+                $fileLocked = $false
+                try {
+                    $fs = [System.IO.File]::Open($sp, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+                    $fs.Dispose()
+                } catch { $fileLocked = $true }
+
+                if ($fileLocked) {
+                    throw "The VHD file is still locked by the Hyper-V worker process (vmwp.exe). " +
+                          "This happens when Docker containers inside the VM have the volume mounted — " +
+                          "stop those containers first, then try again in a few seconds."
+                }
+
+                # VHD in orphaned attached state? Try Dismount-VHD first.
+                $vhdInfo = Get-VHD -Path $sp -ErrorAction SilentlyContinue
+                if ($vhdInfo -and $vhdInfo.Attached) {
+                    Dismount-VHD -Path $sp -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 1
+                }
+
+                $vhd = Mount-VHD -Path $sp -PassThru -ErrorAction Stop
+            }
+
             # Disk may come up offline — bring it online and writable before partition access
             $disk = Get-Disk -Number $vhd.DiskNumber
             if ($disk.IsOffline)  { Set-Disk -Number $vhd.DiskNumber -IsOffline $false }
@@ -485,11 +761,19 @@ $($_.ScriptStackTrace)</pre>
                 Where-Object { $_.Size -gt 100MB -and $_.Type -notin @('System','Reserved','Recovery') } |
                 Select-Object -First 1
             if ($partition) { $partition | Set-Partition -NewDriveLetter $letter }
-        } catch { }
-        Move-PodeResponseUrl -Url "/"
+        } catch {
+            $routeError = "localmount '$storageName': $($_.Exception.Message)"
+        }
+        if ($routeError) {
+            $errMsg = [uri]::EscapeDataString($routeError)
+            Move-PodeResponseUrl -Url "/?flash=$errMsg"
+        } else {
+            Move-PodeResponseUrl -Url "/"
+        }
     }
 
     Add-PodeRoute -Method Post -Path "/storage/:name/localunmount" -ScriptBlock {
+        $routeError = $null
         try {
             Import-Module powershell-yaml -ErrorAction Stop
             $storageName = $WebEvent.Parameters['name']
@@ -498,15 +782,82 @@ $($_.ScriptStackTrace)</pre>
             $vmRoot   = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
             $rawPath  = $stack.storage[$storageName].path
             $sp       = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
+            $sp       = $sp -replace '/', '\'
             # Dismount-VHD -Path fails when VMMS holds the file handle; use DiskNumber
-            $hostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $sp } | Select-Object -First 1
+            $hostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { ($_.Location -replace '/', '\') -ieq $sp } | Select-Object -First 1
             if ($hostDisk) {
                 Dismount-VHD -DiskNumber $hostDisk.Number -ErrorAction Stop
             } else {
                 Dismount-VHD -Path $sp -ErrorAction Stop
             }
-        } catch { }
-        Move-PodeResponseUrl -Url "/"
+        } catch {
+            $routeError = "localunmount '$storageName': $($_.Exception.Message)"
+        }
+        if ($routeError) {
+            Move-PodeResponseUrl -Url "/?flash=$([uri]::EscapeDataString($routeError))"
+        } else {
+            Move-PodeResponseUrl -Url "/"
+        }
+    }
+
+    # -------------------------------------------------------
+    # POST /storage/:name/vmount/:vmname   — add VHDX to VM as a disk
+    # POST /storage/:name/vunmount/:vmname — remove VHDX from VM
+    # -------------------------------------------------------
+    Add-PodeRoute -Method Post -Path "/storage/:name/vmount/:vmname" -ScriptBlock {
+        $routeError = $null
+        try {
+            Import-Module powershell-yaml -ErrorAction Stop
+            $storageName = $WebEvent.Parameters['name']
+            $vmName      = $WebEvent.Parameters['vmname']
+            $cfgFile = Get-PodeState -Name 'ConfigFile'
+            $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
+            $vmRoot  = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
+            $rawPath = $stack.storage[$storageName].path
+            $sp      = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
+            $sp      = $sp -replace '/', '\'
+
+            $hostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { ($_.Location -replace '/', '\') -ieq $sp } | Select-Object -First 1
+            if ($hostDisk) { throw "Storage '$storageName' is currently mounted on the host. Unmount it first." }
+
+            $alreadyAttached = @(Get-VMsWithDisk $sp | Where-Object { $_ -ne $vmName })
+            if ($alreadyAttached.Count -gt 0) { throw "Storage '$storageName' is already attached to VM(s): $($alreadyAttached -join ', ')" }
+
+            if (-not (Get-VMDiskForPath -VmName $vmName -StoragePath $sp)) {
+                Add-VMHardDiskDrive -VMName $vmName -Path $sp -ErrorAction Stop
+            }
+        } catch {
+            $routeError = "vmount '$storageName' -> '$vmName': $($_.Exception.Message)"
+        }
+        if ($routeError) {
+            Move-PodeResponseUrl -Url "/?flash=$([uri]::EscapeDataString($routeError))"
+        } else {
+            Move-PodeResponseUrl -Url "/"
+        }
+    }
+
+    Add-PodeRoute -Method Post -Path "/storage/:name/vunmount/:vmname" -ScriptBlock {
+        $routeError = $null
+        try {
+            Import-Module powershell-yaml -ErrorAction Stop
+            $storageName = $WebEvent.Parameters['name']
+            $vmName      = $WebEvent.Parameters['vmname']
+            $cfgFile = Get-PodeState -Name 'ConfigFile'
+            $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
+            $vmRoot  = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
+            $rawPath = $stack.storage[$storageName].path
+            $sp      = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
+            $sp      = $sp -replace '/', '\'
+            $drive = Get-VMDiskForPath -VmName $vmName -StoragePath $sp
+            if ($drive) { Remove-VMHardDiskDrive -VMHardDiskDrive $drive -ErrorAction Stop }
+        } catch {
+            $routeError = "vunmount '$storageName' from '$vmName': $($_.Exception.Message)"
+        }
+        if ($routeError) {
+            Move-PodeResponseUrl -Url "/?flash=$([uri]::EscapeDataString($routeError))"
+        } else {
+            Move-PodeResponseUrl -Url "/"
+        }
     }
 
     # -------------------------------------------------------
@@ -567,48 +918,17 @@ $($_.ScriptStackTrace)</pre>
     }
 
     # -------------------------------------------------------
-    # GET /api/vm/:name/docker/ps — container list JSON
+    # GET /api/vm/:name/docker/ps — container list JSON (served from cache)
+    # The actual polling is done by the DockerStatsPoller timer so this
+    # route always returns in <1 ms, eliminating concurrent-request races.
     # -------------------------------------------------------
     Add-PodeRoute -Method Get -Path "/api/vm/:name/docker/ps" -ScriptBlock {
-        try {
-            Import-Module powershell-yaml -ErrorAction Stop
-            $vmName  = $WebEvent.Parameters['name']
-            $cfgFile = Get-PodeState -Name 'ConfigFile'
-            $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
-            $vmCfg   = $stack.vms[$vmName]
-            $cred    = $null
-            if ($vmCfg -and $vmCfg.admin_password) {
-                $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
-                $cred  = New-Object PSCredential('administrator', $secpw)
-            }
-            $icArgs = @{ VMName = $vmName; ErrorAction = 'Stop'; ScriptBlock = {
-                $ps  = @(& docker ps -a --format '{{json .}}' 2>$null)
-                $sts = @(& docker stats --no-stream --format '{{json .}}' 2>$null)
-                $sm  = @{}; foreach ($s in $sts) { try { $o = $s | ConvertFrom-Json; $sm[$o.Name] = $o } catch {} }
-                $pvDisk = Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='P:'" -ErrorAction SilentlyContinue
-                $out = @()
-                foreach ($line in $ps) {
-                    try {
-                        $c = $line | ConvertFrom-Json
-                        $cpu = '0%'; $mem = '0B / 0B'
-                        if ($c.State -eq 'running' -and $sm.ContainsKey($c.Names)) {
-                            $cpu = $sm[$c.Names].CPUPerc; $mem = $sm[$c.Names].MemUsage
-                        }
-                        $out += @{ name=$c.Names; image=$c.Image; status=$c.Status; state=$c.State; cpu=$cpu; mem=$mem; ports=$c.Ports; id=$c.ID }
-                    } catch {}
-                }
-                [PSCustomObject]@{
-                    Containers  = $out
-                    PVTotalGB   = if ($pvDisk) { [math]::Round($pvDisk.Size / 1GB, 1) } else { $null }
-                    PVFreeGB    = if ($pvDisk) { [math]::Round($pvDisk.FreeSpace / 1GB, 2) } else { $null }
-                }
-            } }
-            if ($cred) { $icArgs.Credential = $cred }
-            $res = Invoke-Command @icArgs
-            Write-PodeJsonResponse -Value @{ containers = @($res.Containers); pvTotalGB = $res.PVTotalGB; pvFreeGB = $res.PVFreeGB }
-        } catch {
-            Write-PodeJsonResponse -StatusCode 500 -Value @{ error = $_.Exception.Message }
+        $vmName  = $WebEvent.Parameters['name']
+        $jsonStr = Get-PodeState -Name "DockerCache_$vmName"
+        if (-not $jsonStr) {
+            $jsonStr = '{"dockerInstalled":true,"containers":[],"pvTotalGB":null,"pvFreeGB":null}'
         }
+        Write-PodeTextResponse -ContentType 'application/json' -Value $jsonStr
     }
 
     # -------------------------------------------------------
@@ -630,15 +950,17 @@ $($_.ScriptStackTrace)</pre>
             $icArgs = @{ VMName = $vmName; ArgumentList = $ctrName; ErrorAction = 'Stop'; ScriptBlock = {
                 param($cn)
                 $s = & docker stats --no-stream --format '{{json .}}' $cn 2>$null | Select-Object -First 1
-                if ($s) { return ($s | ConvertFrom-Json) } else { return $null }
+                if ($s) {
+                    $o = $s | ConvertFrom-Json
+                    return ([PSCustomObject]@{ cpu=$o.CPUPerc; mem=$o.MemUsage; netIO=$o.NetIO; blockIO=$o.BlockIO; pids=$o.PIDs } | ConvertTo-Json -Compress)
+                } else {
+                    return '{"cpu":"0%","mem":"0B / 0B","netIO":"-","blockIO":"-","pids":"0"}'
+                }
             } }
             if ($cred) { $icArgs.Credential = $cred }
-            $result = Invoke-Command @icArgs
-            if ($result) {
-                Write-PodeJsonResponse -Value @{ cpu=$result.CPUPerc; mem=$result.MemUsage; netIO=$result.NetIO; blockIO=$result.BlockIO; pids=$result.PIDs }
-            } else {
-                Write-PodeJsonResponse -Value @{ cpu='0%'; mem='0B / 0B'; netIO='-'; blockIO='-'; pids='0' }
-            }
+            $jsonStr = [string](Invoke-Command @icArgs | Where-Object { $_ -is [string] } | Select-Object -Last 1)
+            if (-not $jsonStr) { $jsonStr = '{"cpu":"0%","mem":"0B / 0B","netIO":"-","blockIO":"-","pids":"0"}' }
+            Write-PodeTextResponse -ContentType 'application/json' -Value $jsonStr
         } catch {
             Write-PodeJsonResponse -StatusCode 500 -Value @{ error = $_.Exception.Message }
         }
@@ -662,10 +984,11 @@ $($_.ScriptStackTrace)</pre>
             }
             $icArgs = @{ VMName = $vmName; ArgumentList = $ctrName; ErrorAction = 'Stop'; ScriptBlock = {
                 param($cn)
-                @(& docker logs --timestamps --tail 200 $cn 2>&1)
+                # Force all output (including 2>&1 ErrorRecords) to strings before returning
+                @(& docker logs --timestamps --tail 200 $cn 2>&1) | ForEach-Object { "$_" }
             } }
             if ($cred) { $icArgs.Credential = $cred }
-            $lines = @(Invoke-Command @icArgs)
+            $lines = @(Invoke-Command @icArgs) | ForEach-Object { "$_" }
             Write-PodeJsonResponse -Value @{ lines = $lines }
         } catch {
             Write-PodeJsonResponse -StatusCode 500 -Value @{ error = $_.Exception.Message }
@@ -783,6 +1106,10 @@ function pollContainers() {
     .then(data => {
       if (data.error) { document.getElementById('errorBanner').textContent = data.error; document.getElementById('errorBanner').classList.remove('d-none'); return; }
       document.getElementById('errorBanner').classList.add('d-none');
+      if (data.dockerInstalled === false) {
+        document.getElementById('ctrBody').innerHTML = '<tr><td colspan="7" class="text-center text-warning fw-semibold">&#x26A0;&#xFE0F; Docker is not installed on this VM</td></tr>';
+        return;
+      }
       const pv = data.pvTotalGB != null ? 'P: ' + data.pvFreeGB + ' GB free / ' + data.pvTotalGB + ' GB' : 'P: not mounted';
       document.getElementById('pvBadge').textContent = pv;
       document.getElementById('pvBadge').className = 'badge ms-auto ' + (data.pvTotalGB != null ? 'bg-success' : 'bg-secondary');

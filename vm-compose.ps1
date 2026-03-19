@@ -32,7 +32,7 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","validate","version","mount","unmount","storage","localmount","localunmount","cp","copy","metrics","web","dashboard","getlog","note","help")]
+    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","docker-test","validate","version","mount","unmount","storage","localmount","localunmount","cp","copy","metrics","web","dashboard","getlog","note","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -119,7 +119,8 @@ $CommandHelp = @{
     "ssh"      = "ssh <vm>`n  Open an interactive PowerShell Direct session inside a VM."
     "ip"       = "ip <vm>`n  Print the VM's first IPv4 address."
     "top"      = "top <vm>`n  Live CPU/memory loop (Ctrl+C to exit)."
-    "health"   = "health [<vm>]`n  Health check: VM state, IP assignment, Docker responsiveness. Omit <vm> for all."
+    "health"       = "health [<vm>]`n  Health check: VM state, IP assignment, Docker responsiveness. Omit <vm> for all."
+    "docker-test"  = "docker-test <vm>`n  Pull and run a nanoserver hello-world container inside a VM.`n  Auto-detects the OS build to select the correct image tag (ltsc2022, ltsc2025).`n  Starts the Docker service if it is stopped."
     "validate" = "validate`n  Lint vmstack.yaml for missing required fields and broken references."
     "version"  = "version`n  Print version, PowerShell version, and active config file path."
     "mount"    = "mount <vm> <storageName>`n  Hot-add a shared storage VHDX (from the storage: section) to a running VM."
@@ -262,10 +263,12 @@ $vms = $stack.vms.Keys
 # Allow vmstack.yaml to override the VmRoot storage path
 if ($stack.vm_root) { $VmRoot = $stack.vm_root }
 
+. "$PSScriptRoot\vm-lib.ps1"
+
 function Resolve-StoragePath {
     param([string]$path)
-    if ([System.IO.Path]::IsPathRooted($path)) { return $path }
-    return Join-Path $VmRoot $path
+    $resolved = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $VmRoot $path }
+    return $resolved -replace '/', '\'
 }
 
 function Initialize-SharedVHDX {
@@ -285,26 +288,6 @@ function Initialize-SharedVHDX {
     } finally {
         Dismount-VHD -Path $Path -ErrorAction SilentlyContinue
     }
-}
-
-function Test-StorageMountedOnHost {
-    param([string]$StoragePath)
-
-    $vhd = Get-VHD -Path $StoragePath -ErrorAction SilentlyContinue
-    return ($vhd -and $vhd.Attached -and $null -ne $vhd.DiskNumber -and $vhd.DiskNumber -ge 0)
-}
-
-function Get-StorageMountedVMNames {
-    param([string]$StoragePath)
-
-    return @(
-        Get-VM -ErrorAction SilentlyContinue |
-            Where-Object {
-                (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue |
-                    Where-Object Path -eq $StoragePath)
-            } |
-            Select-Object -ExpandProperty Name
-    )
 }
 
 function Get-VMStorageHostConflicts {
@@ -1231,6 +1214,75 @@ function Test-AllVMs {
     Write-Host ""
 }
 
+function Invoke-DockerTest {
+    param([string]$vmName)
+
+    $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+    if (-not $vm) {
+        Write-Host "VM not found: $vmName" -ForegroundColor Red
+        return
+    }
+    if ($vm.State -ne 'Running') {
+        Write-Host "VM '$vmName' is not running (state: $($vm.State))" -ForegroundColor Red
+        return
+    }
+
+    Write-Host ""
+    Write-Host "=== Docker Test: $vmName ===" -ForegroundColor Cyan
+
+    try {
+        $result = Invoke-Command -VMName $vmName -Credential (Get-VMCredential $vmName) -ScriptBlock {
+            $dockerBin = 'C:\Program Files\Docker'
+            if ($env:Path -notlike "*$dockerBin*") { $env:Path = "$env:Path;$dockerBin" }
+
+            $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
+            $tag = if ($build -ge 26100) { 'ltsc2025' } else { 'ltsc2022' }
+            # Windows 11 builds (22000–26099) require Hyper-V isolation for Windows containers
+            $isWin11 = $build -ge 22000 -and $build -lt 26100
+
+            $svc = Get-Service docker -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -ne 'Running') {
+                Write-Host "  Starting Docker service..."
+                Start-Service docker
+                Start-Sleep 5
+            }
+
+            $image = "mcr.microsoft.com/windows/nanoserver:$tag"
+            $runArgs = @('run', '--rm')
+            if ($isWin11) { $runArgs += '--isolation=hyperv' }
+            $runArgs += @($image, 'cmd', '/c', 'echo Hello from Windows container!')
+
+            $output = & docker @runArgs 2>&1
+
+            [PSCustomObject]@{
+                Build   = $build
+                Tag     = $tag
+                IsWin11 = $isWin11
+                Image   = $image
+                Output  = ($output -join "`n").Trim()
+                Success = $LASTEXITCODE -eq 0
+            }
+        } -ErrorAction Stop
+
+        $osLabel = if ($result.Tag -eq 'ltsc2025') { "Windows Server 2025 / Win11 24H2 (build $($result.Build))" }
+                   elseif ($result.IsWin11)         { "Windows 11 (build $($result.Build))" }
+                   else                             { "Windows Server 2022 (build $($result.Build))" }
+
+        Write-Host "  OS     : $osLabel"
+        Write-Host "  Image  : $($result.Image)"
+        if ($result.Success) {
+            Write-Host "  Output : $($result.Output)" -ForegroundColor Green
+            Write-Host "  [+] Docker test passed" -ForegroundColor Green
+        } else {
+            Write-Host "  Output : $($result.Output)" -ForegroundColor Red
+            Write-Host "  [!] Docker test failed" -ForegroundColor Red
+        }
+    } catch {
+        Write-Host "  [!] Could not connect via PowerShell Direct: $_" -ForegroundColor Red
+    }
+    Write-Host ""
+}
+
 function Invoke-Validate {
     $errors = @()
     $warnings = @()
@@ -1350,7 +1402,7 @@ function Dismount-VMStorage {
     }
 
     $storagePath = Resolve-StoragePath $stack.storage[$storageName].path
-    $drive = Get-VMHardDiskDrive -VMName $vmName | Where-Object Path -eq $storagePath
+    $drive = Get-VMDiskForPath -VmName $vmName -StoragePath $storagePath
 
     if (-not $drive) {
         Write-Host "Storage '$storageName' is not currently mounted on $vmName" -ForegroundColor Yellow
@@ -1376,7 +1428,7 @@ function Mount-LocalStorage {
 
     $letter = $DriveLetter.TrimEnd(':').ToUpper()
 
-    $mounted = Get-StorageMountedVMNames $storagePath
+    $mounted = Get-VMsWithDisk $storagePath
     if ($mounted.Count -gt 0) {
         Write-Host "Storage '$StorageName' is mounted on VM(s): $($mounted -join ', ')" -ForegroundColor Red
         Write-Host "  Local mount and VM use are mutually exclusive. Unmount it from the VM first." -ForegroundColor Gray
@@ -1462,9 +1514,7 @@ function Invoke-SharedStorageCommand {
                 }},
                 @{L='MountedOn'; E={
                     $p = Resolve-StoragePath $_.Value.path
-                    $vms = Get-VM -ErrorAction SilentlyContinue |
-                        Where-Object { (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue | Where-Object Path -eq $p) } |
-                        Select-Object -ExpandProperty Name
+                    $vms = Get-VMsWithDisk $p
                     if ($vms) { $vms -join ',' } else { '-' }
                 }}
             )
@@ -1479,9 +1529,7 @@ function Invoke-SharedStorageCommand {
             }
             $storagePath = Resolve-StoragePath $stack.storage[$Name].path
             if (-not (Test-Path $storagePath)) { Write-Host "File not found: $storagePath" -ForegroundColor Yellow; return }
-            $mounted = Get-VM -ErrorAction SilentlyContinue |
-                Where-Object { (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue | Where-Object Path -eq $storagePath) } |
-                Select-Object -ExpandProperty Name
+            $mounted = Get-VMsWithDisk $storagePath
             if ($mounted) {
                 Write-Host "ERROR: '$Name' is currently mounted on: $($mounted -join ', ')" -ForegroundColor Red
                 Write-Host "  Unmount first: vm-compose.ps1 unmount <vm> $Name" -ForegroundColor Gray; return
@@ -1501,9 +1549,7 @@ function Invoke-SharedStorageCommand {
             }
             $storagePath = Resolve-StoragePath $stack.storage[$Name].path
             if (-not (Test-Path $storagePath)) { Write-Host "File not found: $storagePath" -ForegroundColor Red; return }
-            $mounted = Get-VM -ErrorAction SilentlyContinue |
-                Where-Object { (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue | Where-Object Path -eq $storagePath) } |
-                Select-Object -ExpandProperty Name
+            $mounted = Get-VMsWithDisk $storagePath
             if ($mounted) {
                 Write-Host "ERROR: '$Name' is currently mounted on: $($mounted -join ', ')" -ForegroundColor Red
                 Write-Host "  Unmount first: vm-compose.ps1 unmount <vm> $Name" -ForegroundColor Gray; return
@@ -1521,9 +1567,9 @@ function Invoke-SharedStorageCommand {
             }
             $storagePath = Resolve-StoragePath $stack.storage[$Name].path
             if (-not (Test-Path $storagePath)) { Write-Host "VHDX not found: $storagePath" -ForegroundColor Red; return }
-            $vmsMounted = @(Get-VM | Where-Object { (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue).Path -contains $storagePath })
+            $vmsMounted = Get-VMsWithDisk $storagePath
             if ($vmsMounted.Count -gt 0) {
-                Write-Host "Cannot init while mounted on VM(s): $($vmsMounted.Name -join ', ')" -ForegroundColor Red; return
+                Write-Host "Cannot init while mounted on VM(s): $($vmsMounted -join ', ')" -ForegroundColor Red; return
             }
             Initialize-SharedVHDX -Path $storagePath -Label $Name
         }
@@ -1653,10 +1699,8 @@ function Invoke-PVCommand {
             $pvPath = Get-PVPath $VmArg
             if (-not (Test-Path $pvPath)) { Write-Host "Not found: $pvPath" -ForegroundColor Red; return }
             $letter = if ($Extra) { $Extra.TrimEnd(':').ToUpper() } else { 'P' }
-            $vmsRunning = Get-VM -ErrorAction SilentlyContinue | Where-Object {
-                $_.State -eq 'Running' -and (Get-VMHardDiskDrive -VMName $_.Name -ErrorAction SilentlyContinue | Where-Object Path -eq $pvPath)
-            }
-            if ($vmsRunning) { Write-Host "PV in use by running VM: $($vmsRunning.Name -join ', ')" -ForegroundColor Red; return }
+            $vmsRunning = @(Get-VMsWithDisk $pvPath | Where-Object { (Get-VM -Name $_ -ErrorAction SilentlyContinue).State -eq 'Running' })
+            if ($vmsRunning.Count -gt 0) { Write-Host "PV in use by running VM: $($vmsRunning -join ', ')" -ForegroundColor Red; return }
             $existing = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $pvPath } | Select-Object -First 1
             if ($existing) {
                 $vol = Get-Partition -DiskNumber $existing.Number -ErrorAction SilentlyContinue |
@@ -1963,10 +2007,12 @@ switch ($Command) {
     }
 
     "status" {
+        Assert-Admin
         Get-AllVMStatus $VmName
     }
 
     { $_ -in "inspect","describe","show" } {
+        Assert-Admin
         if (-not $VmName) {
             Write-Host "Usage: ./vm-compose.ps1 inspect <vmName>" -ForegroundColor Yellow
         } else {
@@ -1975,6 +2021,7 @@ switch ($Command) {
     }
 
     "logs" {
+        Assert-Admin
         if (-not $VmName) {
             Write-Host "Usage: ./vm-compose.ps1 logs <vmName>" -ForegroundColor Yellow
         } else {
@@ -1983,7 +2030,7 @@ switch ($Command) {
     }
 
     "getlog" {
-        # Ordered list of [type, path, description]
+        Assert-Admin
         # Use $null path for logs pulled via cmdlet rather than Get-Content
         $knownLogs = [ordered]@{
             bootstrap = @{ Path = 'C:\Setup\bootstrap.log';                    Desc = 'Unattend bootstrap script output' }
@@ -2042,6 +2089,7 @@ switch ($Command) {
     }
 
     "exec" {
+        Assert-Admin
         if (-not $VmName -or -not $ExecCommand) {
             Write-Host 'Usage: ./vm-compose.ps1 exec <vmName> "<command>"' -ForegroundColor Yellow
         } else {
@@ -2050,6 +2098,7 @@ switch ($Command) {
     }
 
     "ps" {
+        Assert-Admin
         if (-not $VmName) {
             Write-Host "Usage: ./vm-compose.ps1 ps <vmName>" -ForegroundColor Yellow
         } else {
@@ -2058,6 +2107,7 @@ switch ($Command) {
     }
 
     "ssh" {
+        Assert-Admin
         if (-not $VmName) {
             Write-Host "Usage: ./vm-compose.ps1 ssh <vmName>" -ForegroundColor Yellow
         } else {
@@ -2066,6 +2116,7 @@ switch ($Command) {
     }
 
     "ip" {
+        Assert-Admin
         if (-not $VmName) {
             Write-Host "Usage: ./vm-compose.ps1 ip <vmName>" -ForegroundColor Yellow
         } else {
@@ -2074,6 +2125,7 @@ switch ($Command) {
     }
 
     "top" {
+        Assert-Admin
         if (-not $VmName) {
             Write-Host "Usage: ./vm-compose.ps1 top <vmName>" -ForegroundColor Yellow
         } else {
@@ -2082,7 +2134,17 @@ switch ($Command) {
     }
 
     "health" {
+        Assert-Admin
         Test-AllVMs $VmName
+    }
+
+    "docker-test" {
+        Assert-Admin
+        if (-not $VmName) {
+            Write-Host "Usage: ./vm-compose.ps1 docker-test <vmName>" -ForegroundColor Yellow
+        } else {
+            Invoke-DockerTest $VmName
+        }
     }
 
     "validate" {
@@ -2145,7 +2207,7 @@ switch ($Command) {
     }
 
     { $_ -in "cp","copy" } {
-        # $VmName = source, $ExecCommand = destination (positional params 1 and 2)
+        Assert-Admin
         if (-not $VmName -or -not $ExecCommand) {
             Write-Host "Usage: ./vm-compose.ps1 cp <source> <destination>" -ForegroundColor Yellow
             Write-Host "  Host to VM:  cp C:\local\file.txt  myvm:C:\dest\" -ForegroundColor Gray
@@ -2187,6 +2249,7 @@ switch ($Command) {
     }
 
     "note" {
+        Assert-Admin
         $subCmd = $VmName      # show | add | edit
         $noteVm = $ExecCommand # vm name
 
