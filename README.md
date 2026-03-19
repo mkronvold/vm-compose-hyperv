@@ -13,6 +13,8 @@ It gives you a clean, predictable workflow:
 ./vm-compose.ps1 inspect <vm>
 ./vm-compose.ps1 logs <vm>
 ./vm-compose.ps1 exec <vm> "<command>"
+./vm-compose.ps1 docker <vm> <docker args...>
+./vm-compose.ps1 docker-test <vm>
 ./vm-compose.ps1 ps <vm>
 ./vm-compose.ps1 ssh <vm>
 ./vm-compose.ps1 ip <vm>
@@ -22,15 +24,22 @@ It gives you a clean, predictable workflow:
 ./vm-compose.ps1 version
 ./vm-compose.ps1 mount <vm> <storageName>
 ./vm-compose.ps1 unmount <vm> <storageName>
+./vm-compose.ps1 storage shared ls
+./vm-compose.ps1 storage pv ls
+./vm-compose.ps1 cp <src> <dst>
+./vm-compose.ps1 note <show|add|edit> <vm>
+./vm-compose.ps1 getlog <vm>
 ./vm-compose.ps1 metrics
 ./vm-compose.ps1 web
 ```
 
+> **Note:** Most VM-interaction commands require running as **Administrator** (Hyper-V API requires it). The CLI will tell you if you need to elevate.
+
 Each VM is fully automated:
 
 - Windows Server installs via `Autounattend.xml`
-- Docker Engine installs automatically
-- Docker is configured to use a **persistent VHDX**
+- **Docker Engine** installs automatically from static binaries at `download.docker.com` — no Mirantis Container Runtime or license required
+- Docker is configured to use a **persistent VHDX** (`P:\docker-data`)
 - Networks are auto‑created if missing
 - Shared storage disks can be attached to multiple VMs
 - PowerShell Direct provides logs, exec, ps, ssh, and health checks
@@ -99,7 +108,7 @@ Creates:
 - bootstrap.ps1  
 - VM with attached disks  
 - Automated Windows Server install  
-- Automated Docker install  
+- Automated Docker install  (Docker Engine static binaries — no Mirantis license required)
 - Auto‑created networks (if missing)  
 
 ## Stop all VMs
@@ -202,6 +211,31 @@ Shows:
 ./vm-compose.ps1 exec winhost1 "ipconfig"
 ```
 
+## Run a docker command inside a VM
+```
+./vm-compose.ps1 docker winhost1 ps
+./vm-compose.ps1 docker winhost1 images
+./vm-compose.ps1 docker winhost1 run --rm mcr.microsoft.com/windows/nanoserver:ltsc2022 cmd /c echo hello
+```
+
+Passes all arguments directly to `docker` inside the VM via PowerShell Direct. Safer and more convenient than quoting the full command string with `exec`.
+
+> **Tip:** args that match PowerShell parameter names (e.g. `-Force`) should be quoted: `'-Force'`
+
+## Run a hello-world container test
+```
+./vm-compose.ps1 docker-test winhost1
+```
+
+Pulls and runs a nanoserver container, auto-detecting the correct image tag (ltsc2022/ltsc2025). Starts the Docker service if it's stopped.
+
+## Fetch a specific log from a VM
+```
+./vm-compose.ps1 getlog winhost1              # list available logs
+./vm-compose.ps1 getlog bootstrap winhost1    # fetch bootstrap log
+./vm-compose.ps1 getlog docker winhost1       # fetch docker install log
+```
+
 ---
 
 # PowerShell Direct Tools
@@ -216,7 +250,7 @@ Shows:
 ./vm-compose.ps1 ssh winhost1
 ```
 
-## Print only the VM’s IP address
+## Print only the VM's IP address
 ```
 ./vm-compose.ps1 ip winhost1
 ```
@@ -240,37 +274,27 @@ Checks:
 
 ---
 
-# Storage
+# File Copy
 
-Hyper‑V Compose supports shared disks and named volumes via a `storage:` section.
-
-### Example
-
-```yaml
-storage:
-  shareddata:
-    path: "storage/shareddata.vhdx"
-    size_gb: 100
-```
-
-Mount storage on VMs via the `mount:` key:
-
-```yaml
-vms:
-  winhost1:
-    mount:
-      - shareddata
-```
-
-Shared VHDXes are **auto-created** during `up` if they don't exist.
-
-### Runtime mount / unmount
-
-Hot-add or remove a storage disk from a running VM:
+Copy files between the host and a running VM:
 
 ```
-./vm-compose.ps1 mount winhost1 shareddata
-./vm-compose.ps1 unmount winhost1 shareddata
+./vm-compose.ps1 cp C:\local\file.txt winhost1:C:\dest\
+./vm-compose.ps1 cp winhost1:C:\path\file.txt .
+```
+
+Prefix VM paths with `vmname:` (colon). VM-to-host copy prompts for Administrator credentials inside the VM.
+
+---
+
+# VM Notes
+
+Attach freeform notes to any VM:
+
+```
+./vm-compose.ps1 note show winhost1    # print notes
+./vm-compose.ps1 note add winhost1     # append text
+./vm-compose.ps1 note edit winhost1    # open in Notepad
 ```
 
 ---
@@ -312,9 +336,11 @@ vms:
 
 # Storage
 
-Hyper-V Compose supports shared disks and named volumes via a `storage:` section.
+Hyper‑V Compose supports two types of storage: **shared volumes** and **persistent volumes (PVs)**.
 
-### Example
+## Shared Storage
+
+Shared VHDXes are defined in `vmstack.yaml` and can be attached to multiple VMs simultaneously:
 
 ```yaml
 storage:
@@ -323,39 +349,49 @@ storage:
     size_gb: 100
 ```
 
-Mount storage on VMs via the `mount:` key:
+Mount storage on VMs via the `attach:` key:
 
 ```yaml
 vms:
   winhost1:
-    mount:
+    attach:
       - shareddata
 ```
 
-This mirrors Docker Compose's `volumes:` section and supports:
+Shared VHDXes are **auto-created** during `up` if they don't exist.
 
-- shared datasets  
-- cluster state  
-- SQL Server data disks  
-- Windows container registries  
-
----
-
-# Persistent Docker Storage
-
-Each VM gets a dedicated persistent VHDX:
+### Shared storage commands
 
 ```
-persistent-storage.vhdx
+./vm-compose.ps1 storage shared ls                   # list shared volumes
+./vm-compose.ps1 storage shared localmount <name>    # mount on host (default S:)
+./vm-compose.ps1 storage shared localunmount <name>  # dismount from host
+./vm-compose.ps1 storage shared health [name]        # health check
 ```
 
-This contains:
+### Runtime mount / unmount (to a VM)
 
-- Docker images  
-- Docker containers  
-- Docker volumes  
+Hot-add or remove a storage disk from a running VM:
 
-You can delete and recreate VMs without losing container data.
+```
+./vm-compose.ps1 mount winhost1 shareddata
+./vm-compose.ps1 unmount winhost1 shareddata
+```
+
+## Persistent Volumes (PVs)
+
+Each VM gets a dedicated persistent VHDX (mounted as `P:` inside the VM) that stores Docker images, containers, and volumes. VMs can be deleted and recreated without losing container data.
+
+### Persistent volume commands
+
+```
+./vm-compose.ps1 storage pv ls [vm]                  # list all PVs
+./vm-compose.ps1 storage pv create <vm>              # create VHDX
+./vm-compose.ps1 storage pv destroy <vm>             # delete VHDX
+./vm-compose.ps1 storage pv localmount <vm> [P]      # mount on host
+./vm-compose.ps1 storage pv localunmount <vm>        # dismount from host
+./vm-compose.ps1 storage pv health [vm]              # health check
+```
 
 ---
 
@@ -407,6 +443,7 @@ Features:
 - Live VM table with auto-refresh (every 10s)
 - Per-VM detail page (disks, adapters, checkpoints)
 - Start / Stop / Restart buttons
+- Storage table: all shared volumes and persistent volumes with mount/detach actions
 - JSON API: `GET /api/vms`, `GET /api/vms/:name`
 
 ---
@@ -417,6 +454,7 @@ Features:
 - PowerShell 7+  
 - Windows Server ISO (2022 or 2025 recommended)  
 - [Pode](https://github.com/Badgerati/Pode) module (auto-installed by `vm-dashboard.ps1`)  
+- No Docker license required — uses open-source Docker Engine static binaries  
 
 ---
 
