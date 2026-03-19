@@ -29,7 +29,7 @@ It gives you a clean, predictable workflow:
 Each VM is fully automated:
 
 - Windows Server installs via `Autounattend.xml`
-- Mirantis Container Runtime installs automatically
+- Docker Engine installs automatically
 - Docker is configured to use a **persistent VHDX**
 - Networks are auto‑created if missing
 - Shared storage disks can be attached to multiple VMs
