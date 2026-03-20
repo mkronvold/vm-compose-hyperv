@@ -2,24 +2,27 @@
 
 Get from zero to a running Windows Server VM with Docker in a few steps.
 
+> These scripts run **on the Hyper-V host machine** — the Windows machine that will host the VMs, not inside a VM.
+
 ---
 
 ## Requirements
 
 | Requirement | Notes |
 |-------------|-------|
-| **Windows host** | Windows 10/11 Pro/Enterprise or Windows Server 2019+ |
+| **Hyper-V host** | Windows 10/11 Pro/Enterprise or Windows Server 2019+ with Hyper-V enabled |
 | **Hyper-V enabled** | `Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All` |
 | **PowerShell 7+** | [Download](https://github.com/PowerShell/PowerShell/releases) — required for `ConvertFrom-Yaml` |
-| **Run as Administrator** | Most commands require Hyper-V API access |
+| **Run as Administrator** | Hyper-V API requires admin rights for most commands |
 | **Windows Server ISO** | Server 2022 or 2025 recommended — [Evaluation Center](https://www.microsoft.com/en-us/evalcenter/) |
-| **Pode module** | Auto-installed by `vm-dashboard.ps1` on first run |
+| **Internet access** | Bootstrap downloads Docker Engine from `download.docker.com` during first boot |
+| **Pode module** | Auto-installed by `vm-dashboard.ps1` on first run (dashboard only) |
 
 ---
 
-## Install
+## Setup
 
-**1. Clone the repo**
+**1. Clone the repo onto your Hyper-V host**
 
 ```powershell
 git clone https://github.com/mkronvold/vm-compose-hyperv.git
@@ -34,9 +37,13 @@ Copy-Item vmstack-example.yaml vmstack.yaml
 
 **3. Edit `vmstack.yaml`**
 
-At minimum, set the `iso:` path for each VM to your Windows Server ISO:
+At minimum, point `iso:` at your Windows Server ISO and set `network:` to an existing Hyper-V switch name:
 
 ```yaml
+networks:
+  natnet:
+    switch_name: "Default Switch"   # use an existing Hyper-V switch name
+
 vms:
   myvm:
     iso: "D:/ISO/WindowsServer2022.iso"
@@ -47,35 +54,39 @@ vms:
     network: natnet
 ```
 
-Run `./vm-compose.ps1 validate` to check for errors before proceeding.
+**4. Validate the config**
+
+```powershell
+./vm-compose.ps1 validate
+```
 
 ---
 
 ## First Boot
 
 ```powershell
-# Preview what will be created
+# Preview what will be created (no changes made)
 ./vm-compose.ps1 up -DryRun
 
-# Build and start all VMs
+# Build and start all VMs (run as Administrator)
 ./vm-compose.ps1 up
 ```
 
-This will:
-1. Create a NAT network switch (if missing)
-2. Create the OS VHDX and persistent VHDX
-3. Generate `Autounattend.xml` and `bootstrap.ps1`
-4. Create and start the VM
-5. Windows Server installs unattended (~5–15 min depending on hardware)
-6. Bootstrap runs: installs the Containers feature, reboots, then installs Docker Engine
+What happens:
+1. Resolves the Hyper-V switch for each VM's `network:`
+2. Creates the OS VHDX and persistent VHDX (`P:` drive inside the VM)
+3. Creates any named storage volumes defined in `storage:`
+4. Generates `Autounattend.xml` and `bootstrap.ps1`
+5. Creates and starts the VM — Windows Server installs unattended (~5–15 min)
+6. Bootstrap runs on first login: installs Containers feature, reboots, installs Docker Engine
 
-The first boot takes **15–30 minutes** total. Track progress with:
+The full first-boot cycle takes **15–30 minutes**. Track progress:
 
 ```powershell
-# Watch the VM state
+# Poll VM state
 ./vm-compose.ps1 status
 
-# Full health check (shows bootstrap completion timestamp when done)
+# Full health check — shows bootstrap completion timestamp when done
 ./vm-compose.ps1 health myvm
 ```
 
@@ -83,29 +94,28 @@ The first boot takes **15–30 minutes** total. Track progress with:
 
 ## Sanity Tests
 
-Once `health` shows **Bootstrap complete**, run these quick checks:
+Once `health` shows **Bootstrap complete**, run these checks:
 
 ```powershell
-# 1. Confirm VM is running and has an IP
+# 1. Confirm VM is running with an IP
 ./vm-compose.ps1 status
 
-# 2. Full health check — Docker Engine version, volumes, bootstrap time
+# 2. Full health — Docker Engine version, volumes, bootstrap timestamp
 ./vm-compose.ps1 health myvm
 
-# 3. Run a hello-world Windows container
+# 3. Run a Windows container hello-world (auto-detects ltsc2022/ltsc2025)
 ./vm-compose.ps1 docker-test myvm
 
-# 4. Confirm docker ps works
+# 4. Confirm docker commands work
 ./vm-compose.ps1 docker myvm ps
-
-# 5. Check Docker images
 ./vm-compose.ps1 docker myvm images
 
-# 6. Open a shell and poke around
+# 5. Open an interactive shell
 ./vm-compose.ps1 ssh myvm
 ```
 
 Expected `health` output:
+
 ```
 === VM Health Check ===
 
@@ -121,30 +131,28 @@ VM: myvm
 
 ---
 
-## Install the Web Dashboard (Optional)
+## Optional: Web Dashboard
 
-The dashboard provides a browser UI at `http://localhost:8080`.
+Browser UI at `http://localhost:8080` — shows VM status, storage table, and mount/detach actions.
 
 ```powershell
-# Install as a Windows service (persists across reboots)
+# Install as a Windows service (auto-starts on reboot)
 ./vm-dashboard-install.ps1
 
-# Check status
+# Check service status / URL
 ./vm-compose.ps1 web
 ```
 
-Open http://localhost:8080 in your browser.
-
 ---
 
-## Install the Metrics Exporter (Optional)
+## Optional: Prometheus Metrics
 
-Exposes Prometheus metrics at `http://localhost:9090/metrics`.
+Exposes per-VM metrics at `http://localhost:9090/metrics` for Grafana or any Prometheus-compatible scraper.
 
 ```powershell
 ./vm-metrics-install.ps1
 
-# Check status
+# Check service status
 ./vm-compose.ps1 metrics
 ```
 
@@ -153,26 +161,27 @@ Exposes Prometheus metrics at `http://localhost:9090/metrics`.
 ## Common First-Run Issues
 
 **VM stuck at "Not Created" after `up`**
-- Run as Administrator: `./vm-compose.ps1 up`
-- Check Hyper-V is enabled: `Get-WindowsFeature Hyper-V`
+- Ensure you are running as Administrator
+- Check Hyper-V is enabled: `Get-WindowsFeature Hyper-V` (Server) or check in "Turn Windows features on or off"
 
 **Bootstrap never completes**
 - Check the bootstrap log: `./vm-compose.ps1 getlog bootstrap myvm`
-- Ensure the VM has internet access (needed to download Docker Engine)
+- Ensure the VM has internet access — Docker Engine is downloaded during bootstrap
 - Confirm the ISO path in `vmstack.yaml` is correct
 
 **`health` shows Docker Engine NOT RUNNING**
-- The Docker service may still be starting: wait 30s and retry
+- Docker service may still be starting — wait 30s and retry
 - Check the Docker install log: `./vm-compose.ps1 getlog docker myvm`
 
-**Commands fail with "not recognized as Administrator"**
-- Re-run your PowerShell terminal as Administrator
-- Or prefix: `Start-Process pwsh -Verb RunAs`
+**Commands fail with "requires Administrator privileges"**
+- Re-open PowerShell as Administrator: `Start-Process pwsh -Verb RunAs`
 
 ---
 
 ## Next Steps
 
-- See [EXAMPLES.md](EXAMPLES.md) for a full command reference with examples
-- See [README.md](README.md) for detailed documentation
-- See [REPO.md](REPO.md) for file layout and `.gitignore` reference
+| Doc | Purpose |
+|-----|---------|
+| [EXAMPLES.md](EXAMPLES.md) | Full command reference with real-world examples |
+| [README.md](README.md) | Detailed feature documentation |
+| [REPO.md](REPO.md) | File layout and `.gitignore` reference |

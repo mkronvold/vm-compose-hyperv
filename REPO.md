@@ -13,8 +13,10 @@ win-docker-host/
 ├── vmstack-example.yaml        # Example VM stack config (commit this)
 ├── vmstack.yaml                # Your active config (gitignored)
 ├── storage/                    # VHDX files live here (gitignored)
-├── README.md
-├── REPO.md
+├── README.md                   # Full documentation
+├── QUICKSTART.md               # Install and first-run guide
+├── EXAMPLES.md                 # Command examples reference
+├── REPO.md                     # This file — repo layout and .gitignore reference
 ├── TODO.md
 └── .gitignore
 ```
@@ -22,19 +24,19 @@ win-docker-host/
 ### What each file does
 
 - **vm-compose.ps1**
-  The CLI orchestrator — your "docker-compose" equivalent. Handles `up`, `down`, `exec`, `docker`, `storage`, `health`, and more.
+  The CLI orchestrator. Handles `up`, `down`, `exec`, `docker`, `storage`, `health`, and more. Requires PowerShell 7+ and Administrator privileges for most commands.
 
 - **vm-dashboard.ps1**
-  Pode v2 web dashboard. Shows VM status, storage table, and provides start/stop/restart and storage mount/detach actions.
+  Pode v2 web dashboard at `http://localhost:8080`. Shows VM status, storage table, and provides start/stop/restart and storage mount/detach actions. Install as a service with `vm-dashboard-install.ps1`.
 
 - **vm-lib.ps1**
   Shared helper functions dot-sourced by `vm-compose.ps1` and loaded into all Pode route runspaces via `Use-PodeScript`. Handles VHD checkpoint chain detection (`.avhdx` parent walking) so storage lookups work correctly when VMs have checkpoints.
 
 - **vm-metrics.ps1**
-  Prometheus-compatible metrics exporter on `:9090/metrics`. Exposes per-VM state, CPU, memory, uptime, IP assignment, and Docker status.
+  Prometheus-compatible metrics exporter at `http://localhost:9090/metrics`. Exposes per-VM state, CPU, memory, uptime, IP, and Docker status. Install as a service with `vm-metrics-install.ps1`.
 
 - **vmstack-example.yaml**
-  A committed example config. Copy to `vmstack.yaml` and edit for your environment.
+  A committed example config. Copy to `vmstack.yaml` and edit for your environment. See [QUICKSTART.md](QUICKSTART.md) for setup steps.
 
 - **vmstack.yaml**
   Your live config — gitignored so credentials and local paths don't leak.
@@ -95,85 +97,4 @@ vmstack.yaml
 
 # Generated service wrapper scripts
 *-svc-wrapper.ps1
-```
-
----
-
-# Networks Section (Compose-Style)
-
-Define Hyper-V virtual switches in `vmstack.yaml`, similar to Docker Compose networks:
-
-```yaml
-version: "1"
-
-networks:
-  internal:
-    type: internal
-    switch_name: "hv-int"
-  external:
-    type: external
-    switch_name: "Default Switch"
-  natnet:
-    type: nat
-    switch_name: "hv-nat"
-    subnet: "192.168.200.0/24"
-    gateway: "192.168.200.1"
-
-vms:
-  winhost1:
-    iso: "D:/ISO/WindowsServer2022.iso"
-    memory_gb: 8
-    cpus: 4
-    os_disk_gb: 80
-    persistent_disk_gb: 50
-    network: natnet
-```
-
-### Supported network types
-
-| Type       | Description                              |
-|------------|------------------------------------------|
-| `internal` | VM-only network, no host access          |
-| `external` | Bridge to host NIC (internet access)     |
-| `nat`      | NAT network with custom subnet + gateway |
-
-Switches are **auto-created** if they don't exist.
-
----
-
-# Storage Section (Compose-Style)
-
-Two storage types are supported:
-
-## Shared Storage
-
-Defined in `vmstack.yaml`, can be attached to multiple VMs simultaneously:
-
-```yaml
-storage:
-  shareddata:
-    path: "storage/shareddata.vhdx"
-    size_gb: 100
-
-vms:
-  winhost1:
-    attach:
-      - shareddata
-  winhost2:
-    attach:
-      - shareddata
-```
-
-- VHDXes are **auto-created** during `up`
-- Hot-add/remove at runtime: `mount` / `unmount`
-- Mount on host for direct file access: `storage shared localmount`
-
-## Persistent Volumes (PVs)
-
-Each VM automatically gets a dedicated persistent VHDX (mounted as `P:` inside the VM), sized via `persistent_disk_gb`. Docker's data root is configured to `P:\docker-data` so images, containers, and volumes survive VM rebuilds.
-
-```
-./vm-compose.ps1 storage pv ls
-./vm-compose.ps1 storage pv localmount <vm>
-./vm-compose.ps1 storage pv localunmount <vm>
 ```
