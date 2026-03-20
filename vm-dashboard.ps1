@@ -84,7 +84,12 @@ Start-PodeServer -Threads 2 {
                     ErrorAction = 'Stop'
                     ScriptBlock = {
                         if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-                            return '{"dockerInstalled":false,"containers":[],"pvTotalGB":null,"pvFreeGB":null}'
+                            return '{"dockerInstalled":false,"dockerRunning":false,"containers":[],"pvTotalGB":null,"pvFreeGB":null}'
+                        }
+                        $svc = Get-Service docker -ErrorAction SilentlyContinue
+                        $dockerRunning = [bool]($svc -and $svc.Status -eq 'Running')
+                        if (-not $dockerRunning) {
+                            return ([PSCustomObject]@{ dockerInstalled=$true; dockerRunning=$false; containers=@(); pvTotalGB=$null; pvFreeGB=$null } | ConvertTo-Json -Compress)
                         }
                         $ps = @(& docker ps -a --format '{{json .}}' 2>$null)
                         $statsJob = Start-Job { & docker stats --no-stream --format '{{json .}}' 2>$null }
@@ -109,7 +114,7 @@ Start-PodeServer -Threads 2 {
                         }
                         $pvTotal = if ($pvDisk) { [math]::Round($pvDisk.Size / 1GB, 1) } else { $null }
                         $pvFree  = if ($pvDisk) { [math]::Round($pvDisk.FreeSpace / 1GB, 2) } else { $null }
-                        return ([PSCustomObject]@{ dockerInstalled=$true; containers=$out.ToArray(); pvTotalGB=$pvTotal; pvFreeGB=$pvFree } | ConvertTo-Json -Compress -Depth 5)
+                        return ([PSCustomObject]@{ dockerInstalled=$true; dockerRunning=$true; containers=$out.ToArray(); pvTotalGB=$pvTotal; pvFreeGB=$pvFree } | ConvertTo-Json -Compress -Depth 5)
                     }
                 }
                 if ($cred) { $icArgs.Credential = $cred }
@@ -139,7 +144,7 @@ Start-PodeServer -Threads 2 {
             foreach ($vmName in $stack.vms.Keys) {
                 $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
                 if (-not $vm) {
-                    $rows += "<tr><td><a href='/vm/$vmName'>$vmName</a></td><td><span class='badge bg-secondary'>Not Created</span></td><td>-</td><td>-</td><td>-</td><td>-</td><td></td></tr>"
+                    $rows += "<tr><td><a href='/vm/$vmName'>$vmName</a></td><td><span class='badge bg-secondary'>Not Created</span></td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td></td></tr>"
                     continue
                 }
                 $ip       = (Get-VMNetworkAdapter -VMName $vmName).IPAddresses |
@@ -171,6 +176,18 @@ Start-PodeServer -Threads 2 {
                         }
                     } catch { }
                 }
+                # Docker status from cache (populated by background timer — no blocking call here)
+                $dockerCell = if ($vm.State -ne 'Running') { '<td>-</td>' } else {
+                    $dc = Get-PodeState -Name "DockerCache_$vmName"
+                    if (-not $dc) { '<td><span class="text-muted">…</span></td>' }
+                    else {
+                        try {
+                            $dcObj = $dc | ConvertFrom-Json
+                            if ($dcObj.dockerRunning) { '<td><span class="badge bg-success">&#x1F433; Running</span></td>' }
+                            else { '<td><span class="badge bg-danger">Stopped</span></td>' }
+                        } catch { '<td>-</td>' }
+                    }
+                }
                 $rows += @"
                 <tr>
                   <td><a href="/vm/$vmName">$vmName</a>$evalBadge</td>
@@ -179,6 +196,7 @@ Start-PodeServer -Threads 2 {
                   <td>$memLabel</td>
                   <td>$(if ($ip) { $ip } else { '-' })</td>
                   <td>$uptime</td>
+                  $dockerCell
                   <td>
                     <form method="post" action="/vm/$vmName/start"   style="display:inline"><button class="btn btn-sm btn-success">Start</button></form>
                     <form method="post" action="/vm/$vmName/stop"    style="display:inline"><button class="btn btn-sm btn-warning">Stop</button></form>
@@ -338,7 +356,7 @@ Start-PodeServer -Threads 2 {
   <p class="text-muted mb-3">Auto-refreshes every 10 seconds</p>
   <table class="table table-bordered table-hover bg-white shadow-sm">
     <thead class="table-dark">
-      <tr><th>VM</th><th>State</th><th>CPU</th><th>Memory</th><th>IP</th><th>Uptime</th><th>Actions</th></tr>
+      <tr><th>VM</th><th>State</th><th>CPU</th><th>Memory</th><th>IP</th><th>Uptime</th><th>Docker</th><th>Actions</th></tr>
     </thead>
     <tbody>$rows</tbody>
   </table>
@@ -390,6 +408,21 @@ $($_.ScriptStackTrace)</pre>
             $cpuLabel = "$($vm.CPUUsage)% of $($vm.ProcessorCount) vCPUs"
             $memLabel = "${memPct}% of ${memLimit} GB  ($memUsed GB assigned)"
             $uptime   = if ($vm.Uptime -and $vm.Uptime.TotalSeconds -gt 0) { $vm.Uptime.ToString() } else { "-" }
+            # Docker status from cache (non-blocking)
+            $dockerStatusHtml = ''
+            if ($vm.State -eq 'Running') {
+                $dc = Get-PodeState -Name "DockerCache_$vmName"
+                if ($dc) {
+                    try {
+                        $dcObj = $dc | ConvertFrom-Json
+                        $dockerStatusHtml = if ($dcObj.dockerRunning) {
+                            "<span class='badge bg-success'>&#x1F433; Running</span>"
+                        } else {
+                            "<span class='badge bg-danger'>Stopped</span>"
+                        }
+                    } catch { $dockerStatusHtml = '-' }
+                } else { $dockerStatusHtml = '<span class="text-muted">…</span>' }
+            } else { $dockerStatusHtml = '-' }
             $color    = switch ($vm.State.ToString()) {
                 "Running" { "success" } "Off" { "secondary" } "Saved" { "info" }
                 "Paused"  { "warning" } default { "danger" }
@@ -512,6 +545,7 @@ $($_.ScriptStackTrace)</pre>
         <li class="list-group-item"><strong>Memory:</strong> $memLabel</li>
         <li class="list-group-item"><strong>Generation:</strong> $($vm.Generation)</li>
         <li class="list-group-item"><strong>Uptime:</strong> $uptime</li>
+        <li class="list-group-item"><strong>Docker:</strong> $dockerStatusHtml</li>
       </ul>
       <div class="d-flex gap-2 mb-3">
         <form method="post" action="/vm/$vmName/start">  <button class="btn btn-success">Start</button></form>
@@ -554,6 +588,12 @@ $pvUnmountModal
             $cfgFile = Get-PodeState -Name 'ConfigFile'
             $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
             $vmRoot  = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
+            $vmCfg   = $stack.vms[$vmName]
+            $cred    = $null
+            if ($vmCfg -and $vmCfg.admin_password) {
+                $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
+                $cred  = New-Object PSCredential('administrator', $secpw)
+            }
             $pvPath  = (Join-Path $vmRoot $vmName "persistent-storage.vhdx") -replace '/', '\'
             if (-not (Test-Path $pvPath)) { throw "VHDX not found: $pvPath" }
             $hostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { ($_.Location -replace '/', '\') -ieq $pvPath } | Select-Object -First 1
@@ -561,6 +601,8 @@ $pvUnmountModal
             if (-not (Get-VMDiskForPath -VmName $vmName -StoragePath $pvPath)) {
                 Add-VMHardDiskDrive -VMName $vmName -Path $pvPath -ErrorAction Stop
             }
+            # Start Docker inside the VM now that P:\docker-data is available again
+            Invoke-VMDockerControl -VmName $vmName -Cred $cred -Action 'start'
         } catch { }
         Move-PodeResponseUrl -Url "/"
     }
@@ -572,8 +614,16 @@ $pvUnmountModal
             $cfgFile = Get-PodeState -Name 'ConfigFile'
             $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
             $vmRoot  = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
+            $vmCfg   = $stack.vms[$vmName]
+            $cred    = $null
+            if ($vmCfg -and $vmCfg.admin_password) {
+                $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
+                $cred  = New-Object PSCredential('administrator', $secpw)
+            }
             $pvPath  = (Join-Path $vmRoot $vmName "persistent-storage.vhdx") -replace '/', '\'
             if (-not (Test-Path $pvPath)) { throw "VHDX not found: $pvPath" }
+            # Stop Docker inside the VM before detaching P:\docker-data
+            Invoke-VMDockerControl -VmName $vmName -Cred $cred -Action 'stop'
             # Detach from VM if currently attached (handles .avhdx differencing disks)
             $drive = Get-VMDiskForPath -VmName $vmName -StoragePath $pvPath
             if ($drive) { Remove-VMHardDiskDrive -VMHardDiskDrive $drive -ErrorAction SilentlyContinue }
@@ -597,6 +647,14 @@ $pvUnmountModal
             $cfgFile = Get-PodeState -Name 'ConfigFile'
             $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
             $vmRoot  = if ($stack.vm_root) { $stack.vm_root } else { "C:\HyperV\VMs" }
+            $vmCfg   = $stack.vms[$vmName]
+            $cred    = $null
+            if ($vmCfg -and $vmCfg.admin_password) {
+                $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
+                $cred  = New-Object PSCredential('administrator', $secpw)
+            }
+            # Stop Docker inside the VM before losing access to P:\docker-data
+            Invoke-VMDockerControl -VmName $vmName -Cred $cred -Action 'stop'
             $pvPath  = (Join-Path $vmRoot $vmName "persistent-storage.vhdx") -replace '/', '\'
             $drive = Get-VMDiskForPath -VmName $vmName -StoragePath $pvPath
             if ($drive) { Remove-VMHardDiskDrive -VMHardDiskDrive $drive -ErrorAction Stop }

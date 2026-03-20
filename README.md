@@ -448,10 +448,11 @@ A [Pode](https://badgerati.github.io/Pode/)-based web dashboard at `http://local
 ```
 
 Features:
-- Live VM table with auto-refresh (every 10s)
-- Per-VM detail page (disks, adapters, checkpoints)
+- Live VM table with auto-refresh (every 10s): state, CPU, memory, IP, uptime, **Docker status**
+- Per-VM detail page with Docker status: disks, adapters, checkpoints
 - Start / Stop / Restart buttons
 - Storage table: all shared volumes and persistent volumes with mount/detach actions
+- **PV-aware Docker lifecycle**: detaching a persistent volume (P:) automatically stops Docker first; re-attaching starts it again
 - JSON API: `GET /api/vms`, `GET /api/vms/:name`
 
 ---

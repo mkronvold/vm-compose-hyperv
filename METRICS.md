@@ -43,10 +43,12 @@ Labels: `vm="<vmname>"` on all VM metrics.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `hyperv_vm_docker_running` | gauge | `vm` | `1` if the Docker service is running inside the VM |
+| `hyperv_vm_docker_running` | gauge | `vm` | `1` if the Docker service is running inside the VM; `0` if installed but stopped or VM is off |
 | `hyperv_vm_docker_version_info` | gauge | `vm`, `version` | Always `1`; read the `version` label for the Docker Engine version string (e.g. `29.3.0`) |
 | `hyperv_vm_docker_container_count` | gauge | `vm` | Total containers (running + stopped); `-1` if Docker not running |
 | `hyperv_vm_docker_running_count` | gauge | `vm` | Running containers only; `-1` if Docker not running |
+
+> **Dashboard:** The main VM table and VM detail page display live Docker service status as a **Docker** column sourced from the same cached data, refreshed every 10 seconds.
 
 ### Persistent Volume (P: drive inside VM)
 

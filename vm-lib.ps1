@@ -48,3 +48,45 @@ function Test-StorageMountedOnHost {
         Where-Object { ($_.Location -replace '/', '\') -ieq $sp } |
         Select-Object -First 1)
 }
+
+# Stop or start the Docker service inside a running VM via PowerShell Direct.
+# Used before detaching the persistent volume (P:) and after re-attaching it.
+# Best-effort — errors are silently ignored so the storage operation always proceeds.
+function Invoke-VMDockerControl {
+    param(
+        [string]$VmName,
+        [PSCredential]$Cred,
+        [ValidateSet('stop','start')][string]$Action
+    )
+    $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+    if (-not $vm -or $vm.State -ne 'Running') { return }
+    $icArgs = @{
+        VMName      = $VmName
+        ArgumentList = $Action
+        ErrorAction  = 'SilentlyContinue'
+        ScriptBlock  = {
+            param([string]$act)
+            if ($act -eq 'stop') {
+                Stop-Service docker -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 2   # brief pause for Docker to release P:\docker-data handles
+            } elseif ($act -eq 'start') {
+                # Bring any offline disks online and pin DockerData -> P: before starting Docker
+                Get-Disk | Where-Object IsOffline | ForEach-Object {
+                    Set-Disk -Number $_.Number -IsOffline $false  -ErrorAction SilentlyContinue
+                    Set-Disk -Number $_.Number -IsReadOnly $false -ErrorAction SilentlyContinue
+                }
+                $vol = Get-Volume -FileSystemLabel 'DockerData' -ErrorAction SilentlyContinue
+                if ($vol -and $vol.DriveLetter -ne 'P') {
+                    $part = Get-Disk | Where-Object { -not $_.IsOffline } |
+                        Get-Partition | Where-Object { $_.Size -gt 100MB -and $_.Type -notin @('System','Reserved','Recovery') } |
+                        Where-Object { (Get-Volume -Partition $_ -ErrorAction SilentlyContinue).FileSystemLabel -eq 'DockerData' } |
+                        Select-Object -First 1
+                    if ($part) { $part | Set-Partition -NewDriveLetter 'P' -ErrorAction SilentlyContinue }
+                }
+                Start-Service docker -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    if ($Cred) { $icArgs.Credential = $Cred }
+    try { Invoke-Command @icArgs } catch { }
+}
