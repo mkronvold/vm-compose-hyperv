@@ -206,6 +206,7 @@ Shows:
 `docker-compose` is an alias for the same pass-through:
 ```
 ./vm-compose.ps1 docker-compose winhost1 ps
+./vm-compose.ps1 docker-compose winhost1 build --file C:\apps\enshrouded-docker\docker-compose.yml C:\apps\enshrouded-docker
 ```
 
 Passes all arguments directly to `docker` inside the VM via PowerShell Direct.
