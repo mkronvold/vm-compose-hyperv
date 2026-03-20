@@ -90,7 +90,7 @@ Creates:
 - OS VHDX  
 - Optional persistent Docker VHDX (`persistent_disk_gb` > 0)  
 - Autounattend.xml  
-- bootstrap.ps1  
+- bootstrap.ps1 (rendered from `unattends/bootstrap.template.ps1`)  
 - VM with attached disks  
 - Automated Windows Server install  
 - Automated Docker install  (Docker Engine static binaries — no Mirantis license required)
@@ -225,6 +225,8 @@ Pulls and runs a nanoserver container, auto-detecting the correct image tag (lts
 ./vm-compose.ps1 getlog winhost1              # list available logs
 ./vm-compose.ps1 getlog bootstrap winhost1    # fetch bootstrap log
 ./vm-compose.ps1 getlog docker winhost1       # fetch docker install log
+./vm-compose.ps1 bootlogs winhost1            # bootstrap summary + latest 200 lines (latest run)
+./vm-compose.ps1 bootlogs winhost1 500        # same, custom tail size
 ```
 
 ---
@@ -260,7 +262,8 @@ Checks:
 
 - VM state  
 - IP assignment  
-- Docker responsiveness  
+- Docker readiness (only after bootstrap completes)  
+- Bootstrap progress with warning/failure counters  
 - Docker version  
 
 ---

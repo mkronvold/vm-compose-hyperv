@@ -3,6 +3,9 @@
 ```
 win-docker-host/
 ├── vm-compose.ps1              # CLI orchestrator (docker-compose equivalent)
+├── unattends/                  # Unattend + bootstrap templates used during VM build
+│   ├── bootstrap.template.ps1  # Bootstrapping template rendered per VM by vm-compose.ps1
+│   └── *.xml                   # Windows unattended install templates
 ├── vm-dashboard.ps1            # Pode web dashboard (port 8080)
 ├── vm-lib.ps1                  # Shared library (VHD chain helpers, used by both)
 ├── vm-metrics.ps1              # Prometheus metrics exporter (port 9090)
@@ -24,7 +27,10 @@ win-docker-host/
 ### What each file does
 
 - **vm-compose.ps1**
-  The CLI orchestrator. Handles `up`, `down`, `exec`, `docker`, `storage`, `health`, and more. Requires PowerShell 7+ and Administrator privileges for most commands.
+  The CLI orchestrator. Handles `up`, `down`, `exec`, `docker`, `storage`, `health`, and more. Requires PowerShell 7+ and Administrator privileges for most commands. During build it renders `unattends/bootstrap.template.ps1` into per-VM `Setup\bootstrap.ps1`.
+
+- **unattends/bootstrap.template.ps1**
+  Reusable source template for VM bootstrap logic. `vm-compose.ps1` injects VM-specific values (Docker volume label and optional DISM block) when generating each VM’s `Setup\bootstrap.ps1`.
 
 - **vm-dashboard.ps1**
   Pode v2 web dashboard at `http://localhost:8080`. Shows VM status, storage table, and provides start/stop/restart and storage mount/detach actions. Install as a service with `vm-dashboard-install.ps1`.

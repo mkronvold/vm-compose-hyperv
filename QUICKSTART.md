@@ -76,7 +76,7 @@ What happens:
 1. Resolves the Hyper-V switch for each VM's `network:`
 2. Creates the OS VHDX and optional legacy persistent VHDX (`P:` drive) when `persistent_disk_gb` is set
 3. Creates any named storage volumes defined in `storage:`
-4. Generates `Autounattend.xml` and `bootstrap.ps1`
+4. Generates `Autounattend.xml` and `bootstrap.ps1` (from `unattends/bootstrap.template.ps1`)
 5. Creates and starts the VM — Windows Server installs unattended (~5–15 min)
 6. Bootstrap runs on first login: installs Containers feature, reboots, installs Docker Engine
 
@@ -86,7 +86,7 @@ The full first-boot cycle takes **15–30 minutes**. Track progress:
 # Poll VM state
 ./vm-compose.ps1 status
 
-# Full health check — shows bootstrap completion timestamp when done
+# Full health check — shows bootstrap progress with warning/failure counters
 ./vm-compose.ps1 health myvm
 ```
 
@@ -100,17 +100,20 @@ Once `health` shows **Bootstrap complete**, run these checks:
 # 1. Confirm VM is running with an IP
 ./vm-compose.ps1 status
 
-# 2. Full health — Docker Engine version, volumes, bootstrap timestamp
+# 2. Full health — Docker Engine version, volumes, bootstrap progress counters
 ./vm-compose.ps1 health myvm
 
-# 3. Run a Windows container hello-world (auto-detects ltsc2022/ltsc2025)
+# 3. Bootstrap logs from inside the VM (latest run)
+./vm-compose.ps1 bootlogs myvm
+
+# 4. Run a Windows container hello-world (auto-detects ltsc2022/ltsc2025)
 ./vm-compose.ps1 docker-test myvm
 
-# 4. Confirm docker commands work
+# 5. Confirm docker commands work
 ./vm-compose.ps1 docker myvm ps
 ./vm-compose.ps1 docker myvm images
 
-# 5. Open an interactive shell
+# 6. Open an interactive shell
 ./vm-compose.ps1 ssh myvm
 ```
 
@@ -126,7 +129,7 @@ VM: myvm
   [+] Docker Engine          v29.x.x
   [+] DockerData volume      P: (xx GB free)
   [+] daemon.json            data-root=P:\docker-data
-  Bootstrap: Bootstrap complete: MM/DD/YYYY HH:MM:SS
+  [i] Bootstrap              bootstrap complete with 0 warnings, 0 failures.
 ```
 
 ---
@@ -165,7 +168,7 @@ Exposes per-VM metrics at `http://localhost:9090/metrics` for Grafana or any Pro
 - Check Hyper-V is enabled: `Get-WindowsFeature Hyper-V` (Server) or check in "Turn Windows features on or off"
 
 **Bootstrap never completes**
-- Check the bootstrap log: `./vm-compose.ps1 getlog bootstrap myvm`
+- Check bootstrap progress/logs: `./vm-compose.ps1 bootlogs myvm`
 - Ensure the VM has internet access — Docker Engine is downloaded during bootstrap
 - Confirm the ISO path in `vmstack.yaml` is correct
 

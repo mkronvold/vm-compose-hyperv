@@ -11,6 +11,7 @@
     ./vm-compose.ps1 status
     ./vm-compose.ps1 inspect <vm>
     ./vm-compose.ps1 logs <vm>
+    ./vm-compose.ps1 bootlogs <vm> [tail]
     ./vm-compose.ps1 exec <vm> "<command>"
     ./vm-compose.ps1 ps <vm>
     ./vm-compose.ps1 ssh <vm>
@@ -32,7 +33,7 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","docker","docker-compose","docker-test","validate","version","mount","unmount","storage","localmount","localunmount","cp","copy","metrics","web","dashboard","getlog","note","help")]
+    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","docker","docker-compose","docker-test","validate","version","mount","unmount","storage","localmount","localunmount","cp","copy","metrics","web","dashboard","getlog","bootlogs","note","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -71,6 +72,7 @@ COMMANDS
   status [<vm>]   Show status table (all, or a specific VM)
   inspect <vm>    Show detailed info for a VM (aliases: describe, show)
   logs <vm>       Show application event log from a VM
+  bootlogs <vm> [tail]  Show bootstrap progress/log output from a VM
   exec <vm> <cmd> Run a command inside a VM
   docker <vm> <docker args...>         Run a docker command inside a VM
   docker-compose <vm> <compose args...> Run docker compose inside a VM
@@ -123,7 +125,7 @@ $CommandHelp = @{
     "ssh"      = "ssh <vm>`n  Open an interactive PowerShell Direct session inside a VM."
     "ip"       = "ip <vm>`n  Print the VM's first IPv4 address."
     "top"      = "top <vm>`n  Live CPU/memory loop (Ctrl+C to exit)."
-    "health"       = "health [<vm>]`n  Health check: VM state, IP assignment, Docker responsiveness. Omit <vm> for all."
+    "health"       = "health [<vm>]`n  Health check: VM state, bootstrap progress, and Docker readiness. Omit <vm> for all."
     "docker"       = "docker <vm> <docker args...>`n  Run a docker command inside a VM via PowerShell Direct.`n  Example: ./vm-compose.ps1 docker solr ps`n  Example: ./vm-compose.ps1 docker solr run --rm mcr.microsoft.com/windows/nanoserver:ltsc2022 cmd /c echo hello`n  Note: args that match PowerShell parameter names (e.g. -Force) must be quoted."
     "docker-compose" = "docker-compose <vm> <compose args...>`n  Runs 'docker compose' inside a VM via PowerShell Direct.`n  Example: ./vm-compose.ps1 docker-compose solr version`n  Example: ./vm-compose.ps1 docker-compose solr build P:\app --file P:\app\docker-compose.yml"
     "docker-test"  = "docker-test <vm>`n  Pull and run a nanoserver hello-world container inside a VM.`n  Auto-detects the OS build to select the correct image tag (ltsc2022, ltsc2025).`n  Starts the Docker service if it is stopped."
@@ -139,6 +141,7 @@ $CommandHelp = @{
     "web"      = "web [install|start|stop|restart|status|remove]`n  Manage the vm-dashboard web UI. Default: status.`n  install: run vm-dashboard-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-dashboard-install.ps1  |  Run directly: ./vm-dashboard.ps1"
     "note"     = "note <show|add|edit> <vm>`n  show: Print the VM's Notes field.`n  add:  Prompt for text and append it to the Notes field.`n  edit: Open the Notes field in Notepad for full editing."
     "getlog"   = "getlog <vm>`n  List logs available inside a VM and whether they exist.`n  getlog <logtype> <vm>  Fetch a specific log.`n  Log types: bootstrap, setup, setuperr, docker"
+    "bootlogs" = "bootlogs <vm> [tail]`n  Show C:\Setup\bootstrap.log from the VM with bootstrap progress summary.`n  tail defaults to 200 lines from the latest bootstrap run."
     "help"     = "help [<command>]`n  Show help. Run 'help <command>' for details on a specific command."
 }
 
@@ -587,11 +590,21 @@ function Build-VM {
 Write-Host "Converting Evaluation to $($cfg.product_type)..."
 `$result = & dism.exe /Online /Set-Edition:$dismEdition /ProductKey:$($cfg.product_key) /AcceptEula /NoRestart 2>&1
 if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
-    Write-Host "Edition conversion succeeded. A reboot is required to complete."
+    Write-BootstrapPass -Step 'DISM edition conversion' -Message 'Succeeded; rebooting to complete.'
+    Write-BootstrapStatus -Step 'finalize' -State 'complete'
+    Write-Host "Bootstrap complete: `$(`$script:bootstrapWarnings) warnings, `$(`$script:bootstrapFailures) failures."
+    Write-Host "Bootstrap finished: `$(Get-Date)"
+    Stop-Transcript | Out-Null
     Start-Sleep -Seconds 5
     Restart-Computer -Force
+    exit
 } else {
-    Write-Warning "Edition conversion failed (exit `$LASTEXITCODE). Run manually: dism /Online /Set-Edition:$dismEdition /ProductKey:$($cfg.product_key) /AcceptEula"
+    Write-BootstrapFail -Step 'DISM edition conversion' -Message "Failed (exit `$LASTEXITCODE). Run manually: dism /Online /Set-Edition:$dismEdition /ProductKey:$($cfg.product_key) /AcceptEula"
+    Write-BootstrapStatus -Step 'DISM edition conversion' -State 'failed'
+    Write-Host "Bootstrap failed: `$(`$script:bootstrapWarnings) warnings, `$(`$script:bootstrapFailures) failures."
+    Write-Host "Bootstrap finished: `$(Get-Date)"
+    Stop-Transcript | Out-Null
+    exit 1
 }
 "@
         }
@@ -688,7 +701,7 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
         </RunSynchronousCommand>
         <RunSynchronousCommand wcm:action="add">
           <Order>2</Order>
-          <Path>reg add "HKLM\SYSTEM\CurrentControlSet\Control\Network" /v NewNetworkWindowOff /t REG_SZ /d "" /f</Path>
+          <Path>reg add "HKLM\SYSTEM\CurrentControlSet\Control\Network\NewNetworkWindowOff" /f</Path>
         </RunSynchronousCommand>
       </RunSynchronous>
     </component>
@@ -746,201 +759,16 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
     }
 
     # -------------------------
-    # Generate bootstrap.ps1
+    # Generate bootstrap.ps1 from template
     # -------------------------
-    $bootstrap = @"
-`$logPath = 'C:\Setup\bootstrap.log'
-Start-Transcript -Path `$logPath -Append -Force | Out-Null
-Write-Host "Bootstrap started: `$(Get-Date)"
-
-# Set network profile to Private (suppress location dialog)
-Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
-
-# UX defaults for the autologon admin profile (idempotent)
-reg.exe add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v "HideFileExt" /t REG_DWORD /d 0 /f | Out-Null
-reg.exe add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Search" /v "SearchboxTaskbarMode" /t REG_DWORD /d 0 /f | Out-Null
-reg.exe add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v "TaskbarDa" /t REG_DWORD /d 0 /f | Out-Null
-reg.exe add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v "TaskbarMn" /t REG_DWORD /d 0 /f | Out-Null
-
-# Power tweak: disable sleep, keep hibernate enabled
-powercfg -X -standby-timeout-ac 0
-powercfg -X -standby-timeout-dc 0
-
-# Set SAN policy to OnlineAll so VHDX disks come up online after every reboot
-Set-StorageSetting -NewDiskPolicy OnlineAll -ErrorAction SilentlyContinue
-
-# Bring any currently offline disks online
-Get-Disk | Where-Object IsOffline | ForEach-Object {
-    Write-Host "Bringing disk `$(`$_.Number) (`$(`$_.FriendlyName)) online..."
-    Set-Disk -Number `$_.Number -IsOffline `$false
-    Set-Disk -Number `$_.Number -IsReadOnly `$false
-}
-
-# Initialize legacy persistent storage disk (idempotent — only acts on RAW disks)
-# Select-Object -First 1 avoids the PS5.1 single-object .Count = $null pitfall
-`$rawDisk = Get-Disk | Where-Object PartitionStyle -eq 'RAW' | Select-Object -First 1
-if (`$rawDisk) {
-    Write-Host "Initializing persistent disk `$(`$rawDisk.Number)..."
-    Initialize-Disk -Number `$rawDisk.Number -PartitionStyle GPT -PassThru |
-        New-Partition -UseMaximumSize -AssignDriveLetter |
-        Format-Volume -FileSystem NTFS -NewFileSystemLabel 'DockerData' -Confirm:`$false | Out-Null
-}
-
-# Resolve Docker data volume label preference (named pv-<vm> first when configured, then DockerData)
-`$dockerPreferredLabel = '$preferredDockerVolumeLabel'
-`$dockerCandidateLabels = @(`$dockerPreferredLabel, 'DockerData') | Select-Object -Unique
-`$dockerDataVol = `$null
-foreach (`$lbl in `$dockerCandidateLabels) {
-    `$dockerDataVol = Get-Volume -FileSystemLabel `$lbl -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (`$dockerDataVol) { break }
-}
-
-# Assign drive letters to any partitions that have none (idempotent)
-Get-Disk | Where-Object { `$_.PartitionStyle -ne 'RAW' -and -not `$_.IsOffline } |
-    Get-Partition | Where-Object { -not `$_.DriveLetter -and `$_.Size -gt 100MB -and `$_.Type -notin @('System','Reserved','Recovery') } |
-    ForEach-Object { `$_ | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue }
-
-# Pin drive letters: DockerData-compatible volume -> P:, SharedData -> S:
-# Handles both wrong-letter and no-letter cases by finding the partition via volume label
-`$pinTargets = [System.Collections.ArrayList]@()
-if (`$dockerDataVol) { [void]`$pinTargets.Add([PSCustomObject]@{ Label = `$dockerDataVol.FileSystemLabel; Letter = 'P' }) }
-[void]`$pinTargets.Add([PSCustomObject]@{ Label = 'SharedData'; Letter = 'S' })
-`$pinTargets |
-ForEach-Object {
-    `$pinLabel = `$_.Label; `$pinLetter = `$_.Letter
-    `$vol = Get-Volume -FileSystemLabel `$pinLabel -ErrorAction SilentlyContinue
-    if (-not `$vol) { return }
-    if (`$vol.DriveLetter -eq `$pinLetter) { return }
-    `$part = Get-Disk | Where-Object { -not `$_.IsOffline -and `$_.PartitionStyle -ne 'RAW' } |
-        Get-Partition |
-        Where-Object { `$_.Size -gt 100MB -and `$_.Type -notin @('System','Reserved','Recovery') } |
-        Where-Object { (Get-Volume -Partition `$_ -ErrorAction SilentlyContinue).FileSystemLabel -eq `$pinLabel } |
-        Select-Object -First 1
-    if (`$part) {
-        `$part | Set-Partition -NewDriveLetter `$pinLetter -ErrorAction SilentlyContinue
-        Write-Host "Assigned `$(`$pinLetter): to `$pinLabel"
+    $bootstrapTemplatePath = Join-Path $PSScriptRoot 'unattends\bootstrap.template.ps1'
+    if (-not (Test-Path $bootstrapTemplatePath)) {
+        Write-Host "ERROR: Bootstrap template not found: $bootstrapTemplatePath" -ForegroundColor Red
+        return
     }
-}
-
-# Write Docker daemon config pointing to P:\docker-data (idempotent)
-if (`$dockerDataVol -and
-    -not (Test-Path 'C:\ProgramData\docker\config\daemon.json')) {
-    New-Item -ItemType Directory -Path 'P:\docker-data' -Force | Out-Null
-    `$daemonConfig = @{ 'data-root' = 'P:\docker-data' }
-    New-Item -ItemType Directory -Path 'C:\ProgramData\docker\config' -Force | Out-Null
-    `$daemonConfig | ConvertTo-Json | Out-File 'C:\ProgramData\docker\config\daemon.json' -Encoding utf8 -Force
-}
-
-# Stage 1: Install Containers feature — requires a reboot.
-# Register self as RunOnce so bootstrap continues on next boot.
-`$containerFeature = Get-WindowsFeature -Name Containers
-if (`$containerFeature.InstallState -ne 'Installed') {
-    Write-Host 'Installing Containers feature — will reboot and continue...'
-    Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' ``
-        -Name 'BootstrapContinue' ``
-        -Value 'powershell -ExecutionPolicy Bypass -File "C:\Setup\bootstrap.ps1"'
-    Stop-Transcript | Out-Null
-    Install-WindowsFeature -Name Containers -IncludeAllSubFeature -IncludeManagementTools -Restart
-    exit
-}
-
-# Stage 2: Install Docker Engine via static binaries from download.docker.com.
-# Idempotent — skips if docker service already exists.
-if (-not (Get-Service docker -ErrorAction SilentlyContinue)) {
-    Write-Host 'Installing Docker Engine...'
-    # Fetch latest stable version tag from GitHub API
-    `$release = Invoke-RestMethod 'https://api.github.com/repos/moby/moby/releases/latest' -UseBasicParsing
-    `$dockerVersion = [regex]::Match(`$release.tag_name, '\d+\.\d+\.\d+').Value
-    Write-Host "Docker version: `$dockerVersion"
-    `$zipUrl = "https://download.docker.com/win/static/stable/x86_64/docker-`$dockerVersion.zip"
-    Invoke-WebRequest -UseBasicParsing -Uri `$zipUrl -OutFile 'C:\Setup\docker.zip'
-    Expand-Archive -Path 'C:\Setup\docker.zip' -DestinationPath 'C:\Program Files' -Force
-    `$env:Path = "`$env:Path;C:\Program Files\Docker"
-    [Environment]::SetEnvironmentVariable('Path', "`$([Environment]::GetEnvironmentVariable('Path','Machine'));C:\Program Files\Docker", 'Machine')
-    dockerd --register-service
-    # Delayed-auto start: service starts ~2 min after boot, after storage is fully mounted.
-    # Failure recovery: auto-restart on crash (5s, 10s, 30s intervals).
-    sc.exe config docker start= delayed-auto | Out-Null
-    sc.exe failure docker reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
-    Start-Service docker
-}
-
-# Install Docker Compose CLI plugin (idempotent)
-`$composePluginPath = 'C:\Program Files\Docker\cli-plugins\docker-compose.exe'
-if (-not (Test-Path `$composePluginPath)) {
-    Write-Host 'Installing Docker Compose plugin...'
-    `$composeRelease = Invoke-RestMethod 'https://api.github.com/repos/docker/compose/releases/latest' -UseBasicParsing
-    `$composeAsset = @(`$composeRelease.assets | Where-Object { `$_.name -eq 'docker-compose-windows-x86_64.exe' }) | Select-Object -First 1
-    if (-not `$composeAsset) { throw 'Could not find docker-compose-windows-x86_64.exe in latest docker/compose release.' }
-    New-Item -ItemType Directory -Path 'C:\Program Files\Docker\cli-plugins' -Force | Out-Null
-    Invoke-WebRequest -UseBasicParsing -Uri `$composeAsset.browser_download_url -OutFile `$composePluginPath
-}
-
-# Ensure winget is installed first (best-effort)
-`$wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
-if (-not `$wingetCmd) {
-    Write-Host 'winget not found. Trying Repair-WinGetPackageManager...'
-    try {
-        Install-PackageProvider -Name NuGet -Force | Out-Null
-        Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery -Scope AllUsers -AllowClobber | Out-Null
-        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-        Repair-WinGetPackageManager -AllUsers -Latest -ErrorAction Stop | Out-Null
-    } catch {
-        Write-Warning "Repair-WinGetPackageManager failed: `$(`$_.Exception.Message)"
-    }
-    `$wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
-}
-
-if (-not `$wingetCmd) {
-    Write-Host 'winget still not found. Installing App Installer bundle + dependencies...'
-    `$wingetRelease = Invoke-RestMethod 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing
-    `$wingetBundleAsset = @(`$wingetRelease.assets | Where-Object { `$_.name -eq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle' }) | Select-Object -First 1
-    `$wingetDepsAsset = @(`$wingetRelease.assets | Where-Object { `$_.name -eq 'DesktopAppInstaller_Dependencies.zip' }) | Select-Object -First 1
-    if (`$wingetBundleAsset -and `$wingetDepsAsset) {
-        `$wingetBundlePath = 'C:\Setup\Microsoft.DesktopAppInstaller.msixbundle'
-        `$wingetDepsZipPath = 'C:\Setup\DesktopAppInstaller_Dependencies.zip'
-        `$wingetDepsDir = 'C:\Setup\DesktopAppInstaller_Dependencies'
-
-        Invoke-WebRequest -UseBasicParsing -Uri `$wingetDepsAsset.browser_download_url -OutFile `$wingetDepsZipPath
-        if (Test-Path `$wingetDepsDir) { Remove-Item `$wingetDepsDir -Recurse -Force -ErrorAction SilentlyContinue }
-        Expand-Archive -Path `$wingetDepsZipPath -DestinationPath `$wingetDepsDir -Force
-        `$depPkgs = @(Get-ChildItem `$wingetDepsDir -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { `$_.Extension -in @('.appx', '.msix', '.appxbundle', '.msixbundle') -and `$_.Name -match 'x64|neutral' } |
-            Select-Object -ExpandProperty FullName)
-
-        Invoke-WebRequest -UseBasicParsing -Uri `$wingetBundleAsset.browser_download_url -OutFile `$wingetBundlePath
-        if (`$depPkgs.Count -gt 0) {
-            Add-AppxPackage -Path `$wingetBundlePath -DependencyPath `$depPkgs -ErrorAction SilentlyContinue
-        } else {
-            Add-AppxPackage -Path `$wingetBundlePath -ErrorAction SilentlyContinue
-        }
-        # Sometimes package installs but winget alias registration lags.
-        Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' -ErrorAction SilentlyContinue
-        `$wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
-    } else {
-        Write-Warning 'Could not find App Installer bundle/dependency assets in microsoft/winget-cli release assets.'
-    }
-}
-
-# Install Git + GitHub tooling via winget (best-effort, idempotent)
-`$wingetExe = if (`$wingetCmd) { `$wingetCmd.Source } else { `$null }
-if (-not `$wingetExe) {
-    `$candidateWingetExe = Join-Path `$env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
-    if (Test-Path `$candidateWingetExe) { `$wingetExe = `$candidateWingetExe }
-}
-if (`$wingetExe) {
-    foreach (`$pkgId in @('Git.Git','GitHub.cli','GitHub.GitLFS','GitHub.Copilot')) {
-        Write-Host "Installing `$pkgId via winget..."
-        & `$wingetExe install --id `$pkgId -e --source winget --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
-    }
-} else {
-    Write-Warning 'winget is not available; skipping Git/GitHub tool installation.'
-}
-
-$dismConversionBlock
-Write-Host "Bootstrap complete: `$(Get-Date)"
-Stop-Transcript | Out-Null
-"@
+    $bootstrap = Get-Content $bootstrapTemplatePath -Raw
+    $bootstrap = $bootstrap.Replace('__PREFERRED_DOCKER_VOLUME_LABEL__', $preferredDockerVolumeLabel)
+    $bootstrap = $bootstrap.Replace('__DISM_CONVERSION_BLOCK__', $dismConversionBlock)
 
     Invoke-IfLive "Write bootstrap.ps1 to $SetupDir" {
         $bootstrap | Out-File "$SetupDir\bootstrap.ps1" -Encoding utf8 -Force
@@ -1222,6 +1050,195 @@ function Get-VMLogs {
     }
 }
 
+function Get-VMBootstrapLogs {
+    param(
+        [string]$vmName,
+        [int]$Tail = 200
+    )
+
+    if (-not (Get-VM -Name $vmName -ErrorAction SilentlyContinue)) {
+        Write-Host "VM not found: $vmName" -ForegroundColor Red
+        return
+    }
+
+    if ($Tail -le 0) { $Tail = 200 }
+
+    try {
+        $result = Invoke-Command -VMName $vmName -Credential (Get-VMCredential $vmName) -ArgumentList $Tail -ScriptBlock {
+            param([int]$tailCount)
+
+            $path = 'C:\Setup\bootstrap.log'
+            if (-not (Test-Path $path)) {
+                return [PSCustomObject]@{
+                    Found      = $false
+                    Message    = "Log not found: $path"
+                    RunId      = $null
+                    State      = 'unknown'
+                    Step       = $null
+                    Warnings   = 0
+                    Failures   = 0
+                    LastStatus = '(no log)'
+                    LastWriteUtc = $null
+                    AgeMinutes = $null
+                    IsStale    = $false
+                    Lines      = @()
+                }
+            }
+
+            $logItem = Get-Item $path -ErrorAction SilentlyContinue
+            $lastWriteUtc = if ($logItem) { [datetime]$logItem.LastWriteTimeUtc } else { $null }
+            $lines = @(Get-Content $path -ErrorAction SilentlyContinue)
+            if ($lines.Count -eq 0) {
+                return [PSCustomObject]@{
+                    Found      = $true
+                    Message    = 'Log exists but is empty.'
+                    RunId      = $null
+                    State      = 'unknown'
+                    Step       = $null
+                    Warnings   = 0
+                    Failures   = 0
+                    LastStatus = '(empty log)'
+                    LastWriteUtc = $lastWriteUtc
+                    AgeMinutes = $null
+                    IsStale    = $false
+                    Lines      = @()
+                }
+            }
+
+            $runRegex = 'BOOTSTRAP_RUN_ID=(?<run>\S+)'
+            $statusRegex = 'BOOTSTRAP_STATUS\|run=(?<run>[^|]+)\|state=(?<state>[^|]+)\|warnings=(?<warnings>\d+)\|failures=(?<failures>\d+)\|step=(?<step>.*)$'
+
+            $runStartIndex = 0
+            $activeRunId = $null
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match $runRegex) {
+                    $activeRunId = $Matches['run']
+                    $runStartIndex = $i
+                }
+            }
+
+            $runLines = @($lines[$runStartIndex..($lines.Count - 1)])
+            $statuses = @()
+            foreach ($line in $runLines) {
+                if ($line -match $statusRegex) {
+                    $statuses += [PSCustomObject]@{
+                        RunId    = $Matches['run']
+                        State    = $Matches['state']
+                        Warnings = [int]$Matches['warnings']
+                        Failures = [int]$Matches['failures']
+                        Step     = $Matches['step']
+                        Line     = $line
+                    }
+                }
+            }
+
+            $state = 'unknown'
+            $step = $null
+            $warnings = 0
+            $failures = 0
+            $lastStatus = '(no bootstrap status marker found)'
+
+            if ($statuses.Count -gt 0) {
+                $last = $statuses | Select-Object -Last 1
+                $state = $last.State
+                $step = $last.Step
+                $warnings = $last.Warnings
+                $failures = $last.Failures
+                $lastStatus = $last.Line
+                if (-not $activeRunId) { $activeRunId = $last.RunId }
+            } else {
+                $legacy = ($runLines | Select-String 'Bootstrap' | Select-Object -Last 1).Line
+                if ($legacy) {
+                    $lastStatus = $legacy
+                    $step = 'legacy-bootstrap-entry'
+                    if ($legacy -match '(?i)bootstrap complete') {
+                        $state = 'complete'
+                    } else {
+                        $state = 'running'
+                    }
+                }
+            }
+            $state = $state.ToLower()
+            if ($state -eq 'running' -and $failures -gt 0) {
+                $state = 'failed'
+            }
+
+            $ageMinutes = $null
+            $isStale = $false
+            if ($lastWriteUtc -and $state -in @('running', 'rebooting')) {
+                $ageMinutes = [math]::Round(((Get-Date).ToUniversalTime() - $lastWriteUtc).TotalMinutes, 1)
+                $staleThresholdMinutes = if ($step -match '(?i)Register bootstrap RunOnce continuation|Install Containers feature') { 15 } else { 30 }
+                if ($ageMinutes -ge $staleThresholdMinutes) {
+                    $isStale = $true
+                }
+            }
+
+            $tailLines = if ($runLines.Count -gt $tailCount) { $runLines | Select-Object -Last $tailCount } else { $runLines }
+            return [PSCustomObject]@{
+                Found      = $true
+                Message    = $null
+                RunId      = $activeRunId
+                State      = $state
+                Step       = $step
+                Warnings   = $warnings
+                Failures   = $failures
+                LastStatus = $lastStatus
+                LastWriteUtc = $lastWriteUtc
+                AgeMinutes = $ageMinutes
+                IsStale    = $isStale
+                Lines      = $tailLines
+            }
+        } -ErrorAction Stop
+
+        Write-Host "=== Bootstrap logs for $vmName ===" -ForegroundColor Cyan
+        if (-not $result.Found) {
+            Write-Host $result.Message -ForegroundColor Yellow
+            return
+        }
+
+        $statusLine = switch ($result.State) {
+            'complete' { "bootstrap complete with $($result.Warnings) warnings, $($result.Failures) failures." }
+            'running'  { "bootstrap running with $($result.Warnings) warnings $($result.Failures) failures." }
+            'rebooting' { "bootstrap running with $($result.Warnings) warnings $($result.Failures) failures." }
+            'failed' { "bootstrap failed with $($result.Warnings) warnings, $($result.Failures) failures." }
+            default    { "bootstrap status unknown (warnings=$($result.Warnings), failures=$($result.Failures))." }
+        }
+        $statusColor = switch ($result.State) {
+            'complete' { if ($result.Failures -gt 0) { 'Yellow' } else { 'Green' } }
+            'running'  { 'Yellow' }
+            'rebooting' { 'Yellow' }
+            'failed' { 'Red' }
+            default    { 'DarkGray' }
+        }
+        if ($result.IsStale) {
+            $stepLabel = if ($result.Step) { $result.Step } else { '(unknown step)' }
+            $statusLine = "bootstrap appears stalled at '$stepLabel' with $($result.Warnings) warnings $($result.Failures) failures (last update $($result.AgeMinutes) min ago)."
+            $statusColor = 'Red'
+        }
+
+        Write-Host "Status : $statusLine" -ForegroundColor $statusColor
+        Write-Host "Run ID : $(if ($result.RunId) { $result.RunId } else { '(legacy/no marker)' })" -ForegroundColor DarkGray
+        if ($null -ne $result.AgeMinutes) {
+            Write-Host "Age    : $($result.AgeMinutes) min since last log update" -ForegroundColor DarkGray
+        }
+        if ($result.State -eq 'failed') {
+            Write-Host "Action : Sign into the VM and run C:\Setup\bootstrap.ps1 manually after fixing the failing step." -ForegroundColor Yellow
+        } elseif ($result.IsStale) {
+            Write-Host "Action : Sign into the VM and run C:\Setup\bootstrap.ps1 manually." -ForegroundColor Yellow
+        }
+        Write-Host "Marker : $($result.LastStatus)" -ForegroundColor DarkGray
+        Write-Host ""
+
+        if ($result.Lines -and $result.Lines.Count -gt 0) {
+            $result.Lines | ForEach-Object { Write-Host $_ }
+        } else {
+            Write-Host "(No lines in selected run.)" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Host "Error retrieving bootstrap log from '$vmName': $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
 function Invoke-VMCommand {
     param($vmName, $cmd)
     if (-not (Get-VM -Name $vmName -ErrorAction SilentlyContinue)) {
@@ -1386,34 +1403,124 @@ function Test-AllVMs {
                     Select-Object -First 1
                 if ($slp) { $evalDays = [math]::Floor($slp.GracePeriodRemaining / 1440) }
 
-                # Bootstrap log last line
-                $lastLine = if (Test-Path 'C:\Setup\bootstrap.log') {
-                    (Get-Content 'C:\Setup\bootstrap.log' | Select-String 'Bootstrap' | Select-Object -Last 1).Line
-                } else { '(no log)' }
+                # Bootstrap status/progress from structured markers in bootstrap.log
+                $bootstrapState = 'unknown'
+                $bootstrapStep = $null
+                $bootstrapWarnings = 0
+                $bootstrapFailures = 0
+                $bootstrapLast = '(no log)'
+                $bootstrapRunId = $null
+                $bootstrapLastWriteUtc = $null
+                $bootstrapAgeMinutes = $null
+                $bootstrapStalled = $false
+                if (Test-Path 'C:\Setup\bootstrap.log') {
+                    $logItem = Get-Item 'C:\Setup\bootstrap.log' -ErrorAction SilentlyContinue
+                    if ($logItem) { $bootstrapLastWriteUtc = [datetime]$logItem.LastWriteTimeUtc }
+                    $bootLines = @(Get-Content 'C:\Setup\bootstrap.log' -ErrorAction SilentlyContinue)
+                    if ($bootLines.Count -gt 0) {
+                        $runRegex = 'BOOTSTRAP_RUN_ID=(?<run>\S+)'
+                        $statusRegex = 'BOOTSTRAP_STATUS\|run=(?<run>[^|]+)\|state=(?<state>[^|]+)\|warnings=(?<warnings>\d+)\|failures=(?<failures>\d+)\|step=(?<step>.*)$'
+                        $runStartIndex = 0
+                        for ($i = 0; $i -lt $bootLines.Count; $i++) {
+                            if ($bootLines[$i] -match $runRegex) {
+                                $bootstrapRunId = $Matches['run']
+                                $runStartIndex = $i
+                            }
+                        }
+                        $runLines = @($bootLines[$runStartIndex..($bootLines.Count - 1)])
+                        $statusLines = @()
+                        foreach ($line in $runLines) {
+                            if ($line -match $statusRegex) {
+                                $statusLines += [PSCustomObject]@{
+                                    RunId    = $Matches['run']
+                                    State    = $Matches['state']
+                                    Warnings = [int]$Matches['warnings']
+                                    Failures = [int]$Matches['failures']
+                                    Step     = $Matches['step']
+                                    Line     = $line
+                                }
+                            }
+                        }
+                        if ($statusLines.Count -gt 0) {
+                            $lastStatus = $statusLines | Select-Object -Last 1
+                            $bootstrapState = $lastStatus.State.ToLower()
+                            $bootstrapStep = $lastStatus.Step
+                            $bootstrapWarnings = $lastStatus.Warnings
+                            $bootstrapFailures = $lastStatus.Failures
+                            $bootstrapLast = $lastStatus.Line
+                            if (-not $bootstrapRunId) { $bootstrapRunId = $lastStatus.RunId }
+                        } else {
+                            $legacy = ($runLines | Select-String 'Bootstrap' | Select-Object -Last 1).Line
+                            if ($legacy) {
+                                $bootstrapLast = $legacy
+                                $bootstrapStep = 'legacy-bootstrap-entry'
+                                if ($legacy -match '(?i)bootstrap complete') {
+                                    $bootstrapState = 'complete'
+                                } else {
+                                    $bootstrapState = 'running'
+                                }
+                            } else {
+                                $bootstrapLast = '(no bootstrap markers found)'
+                            }
+                        }
+                    } else {
+                        $bootstrapLast = '(empty log)'
+                    }
+                }
+                $bootstrapState = $bootstrapState.ToLower()
+                if ($bootstrapState -eq 'running' -and $bootstrapFailures -gt 0) {
+                    $bootstrapState = 'failed'
+                }
 
-                $bootstrapComplete = $lastLine -match '(?i)bootstrap complete'
+                if ($bootstrapLastWriteUtc -and $bootstrapState -in @('running', 'rebooting')) {
+                    $bootstrapAgeMinutes = [math]::Round(((Get-Date).ToUniversalTime() - $bootstrapLastWriteUtc).TotalMinutes, 1)
+                    $staleThresholdMinutes = if ($bootstrapStep -match '(?i)Register bootstrap RunOnce continuation|Install Containers feature') { 15 } else { 30 }
+                    if ($bootstrapAgeMinutes -ge $staleThresholdMinutes) {
+                        $bootstrapStalled = $true
+                    }
+                }
+
+                $bootstrapComplete = $bootstrapState -eq 'complete'
 
                 # Docker readiness is only enforced after bootstrap completes.
                 $dockerVer = $null
                 $dockerOk = $false
+                $composeVer = $null
+                $composeOk = $false
                 if ($bootstrapComplete) {
                     try {
                         $dockerVer = & docker info --format '{{.ServerVersion}}' 2>$null
                         $dockerOk  = $LASTEXITCODE -eq 0 -and $dockerVer
+                    } catch { }
+                    try {
+                        $composeVerRaw = & docker compose version --short 2>$null
+                        if ($LASTEXITCODE -eq 0 -and $composeVerRaw) {
+                            $composeVer = $composeVerRaw.ToString().Trim()
+                            $composeOk = $true
+                        }
                     } catch { }
                 }
 
                 [PSCustomObject]@{
                     DockerOk      = $dockerOk
                     DockerVersion = $dockerVer
+                    ComposeOk     = $composeOk
+                    ComposeVersion = $composeVer
                     BootstrapComplete = $bootstrapComplete
+                    BootstrapState = $bootstrapState
+                    BootstrapWarnings = $bootstrapWarnings
+                    BootstrapFailures = $bootstrapFailures
+                    BootstrapRunId = $bootstrapRunId
+                    BootstrapStep = $bootstrapStep
+                    BootstrapAgeMinutes = $bootstrapAgeMinutes
+                    BootstrapStalled = $bootstrapStalled
                     FeatureOk     = $feature
                     DockerVolume  = if ($dockerVol) { "$($dockerVol.DriveLetter): ($([math]::Round($dockerVol.SizeRemaining/1GB,1)) GB free)" } else { $null }
                     DaemonJson    = $daemonJson
                     DataRoot      = $dataRoot
                     SharedVols    = $sharedVols | ForEach-Object { "$($_.DriveLetter): $($_.FileSystemLabel)" }
                     EvalDays      = $evalDays
-                    BootstrapLast = $lastLine
+                    BootstrapLast = $bootstrapLast
                 }
             } -ErrorAction Stop
 
@@ -1426,8 +1533,10 @@ function Test-AllVMs {
             & $fmt $checks.FeatureOk     'Containers feature'  $(if ($checks.FeatureOk) { 'Installed' } else { 'MISSING' })
             if ($checks.BootstrapComplete) {
                 & $fmt $checks.DockerOk  'Docker Engine'       $(if ($checks.DockerVersion) { "v$($checks.DockerVersion)" } else { 'NOT RUNNING' })
+                & $fmt $checks.ComposeOk 'Docker Compose'      $(if ($checks.ComposeVersion) { "v$($checks.ComposeVersion)" } else { 'NOT FOUND' })
             } else {
                 Write-Host ("  [i] {0,-22} {1}" -f 'Docker Engine', 'bootstrap not complete yet') -ForegroundColor Yellow
+                Write-Host ("  [i] {0,-22} {1}" -f 'Docker Compose', 'bootstrap not complete yet') -ForegroundColor Yellow
             }
             & $fmt ($null -ne $checks.DockerVolume) 'Docker data volume' $(if ($checks.DockerVolume) { $checks.DockerVolume } else { 'NOT FOUND (check disk offline policy)' })
             & $fmt $checks.DaemonJson    'daemon.json'         $(if ($checks.DataRoot) { "data-root=$($checks.DataRoot)" } else { 'missing or unconfigured' })
@@ -1443,7 +1552,43 @@ function Test-AllVMs {
                 $evalMsg = "$($checks.EvalDays) days remaining"
                 Write-Host ("  [i] {0,-22} {1}" -f 'Eval license', $evalMsg) -ForegroundColor $evalColor
             }
-            Write-Host "  Bootstrap: $($checks.BootstrapLast)" -ForegroundColor $(if ($checks.BootstrapLast -like '*complete*') { 'Green' } else { 'Yellow' })
+            $bootstrapMsg = switch ($checks.BootstrapState) {
+                'complete' { "bootstrap complete with $($checks.BootstrapWarnings) warnings, $($checks.BootstrapFailures) failures." }
+                'running' { "bootstrap running with $($checks.BootstrapWarnings) warnings $($checks.BootstrapFailures) failures." }
+                'rebooting' { "bootstrap running with $($checks.BootstrapWarnings) warnings $($checks.BootstrapFailures) failures." }
+                'failed' { "bootstrap failed with $($checks.BootstrapWarnings) warnings, $($checks.BootstrapFailures) failures." }
+                default {
+                    if ($checks.BootstrapLast -like '*complete*') {
+                        "bootstrap complete with $($checks.BootstrapWarnings) warnings, $($checks.BootstrapFailures) failures."
+                    } elseif ($checks.BootstrapLast -eq '(no log)') {
+                        "bootstrap log not found."
+                    } else {
+                        "bootstrap status unknown (warnings=$($checks.BootstrapWarnings), failures=$($checks.BootstrapFailures))."
+                    }
+                }
+            }
+            if ($checks.BootstrapStalled) {
+                $stallStep = if ($checks.BootstrapStep) { $checks.BootstrapStep } else { '(unknown step)' }
+                $bootstrapMsg = "bootstrap appears stalled at '$stallStep' with $($checks.BootstrapWarnings) warnings $($checks.BootstrapFailures) failures."
+            }
+            $bootstrapColor = switch ($checks.BootstrapState) {
+                'complete' { if ($checks.BootstrapFailures -gt 0) { 'Yellow' } else { 'Green' } }
+                'running' { 'Yellow' }
+                'rebooting' { 'Yellow' }
+                'failed' { 'Red' }
+                default { if ($checks.BootstrapLast -like '*complete*') { 'Green' } else { 'Yellow' } }
+            }
+            if ($checks.BootstrapStalled) { $bootstrapColor = 'Red' }
+            Write-Host ("  [i] {0,-22} {1}" -f 'Bootstrap', $bootstrapMsg) -ForegroundColor $bootstrapColor
+            if ($null -ne $checks.BootstrapAgeMinutes) {
+                Write-Host ("      Last update: {0} min ago" -f $checks.BootstrapAgeMinutes) -ForegroundColor DarkGray
+            }
+            Write-Host ("      {0}" -f $checks.BootstrapLast) -ForegroundColor DarkGray
+            if ($checks.BootstrapState -eq 'failed') {
+                Write-Host "      Action: fix the failing step, then rerun C:\Setup\bootstrap.ps1 inside the VM." -ForegroundColor Yellow
+            } elseif ($checks.BootstrapStalled) {
+                Write-Host "      Action: sign into VM and run C:\Setup\bootstrap.ps1 manually." -ForegroundColor Yellow
+            }
 
         } catch {
             Write-Host "  [!] Could not connect via PowerShell Direct: $_" -ForegroundColor Red
@@ -2458,6 +2603,22 @@ switch ($Command) {
                 # docker → Windows Event Log
                 Invoke-VMCommand $vmTarget "Get-EventLog -LogName Application -Source docker -Newest 100 -ErrorAction SilentlyContinue | Format-Table TimeGenerated,EntryType,Message -AutoSize -Wrap"
             }
+        }
+    }
+
+    "bootlogs" {
+        Assert-Admin
+        if (-not $VmName) {
+            Write-Host "Usage: ./vm-compose.ps1 bootlogs <vmName> [tailLines]" -ForegroundColor Yellow
+        } else {
+            $tailLines = 200
+            if ($ExecCommand) {
+                if (-not [int]::TryParse($ExecCommand, [ref]$tailLines)) {
+                    Write-Host "Invalid tail value '$ExecCommand' (must be an integer)." -ForegroundColor Yellow
+                    $tailLines = 200
+                }
+            }
+            Get-VMBootstrapLogs -vmName $VmName -Tail $tailLines
         }
     }
 
