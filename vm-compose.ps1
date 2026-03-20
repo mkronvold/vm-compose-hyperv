@@ -600,6 +600,12 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
         </RunSynchronousCommand>
       </RunSynchronous>
     </component>
+    <component xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" name="Microsoft-Windows-ServerManager-SvrMgrNc" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <DoNotOpenServerManagerAtLogon>true</DoNotOpenServerManagerAtLogon>
+    </component>
+    <component xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" name="Microsoft-Windows-OutOfBoxExperience" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <DoNotOpenInitialConfigurationTasksAtLogon>true</DoNotOpenInitialConfigurationTasksAtLogon>
+    </component>
   </settings>
 
   <settings pass="oobeSystem">
@@ -612,6 +618,8 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
         <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
         <NetworkLocation>Work</NetworkLocation>
         <ProtectYourPC>3</ProtectYourPC>
+        <SkipUserOOBE>true</SkipUserOOBE>
+        <SkipMachineOOBE>true</SkipMachineOOBE>
       </OOBE>
       <AutoLogon>
         <Password>
@@ -655,6 +663,16 @@ Write-Host "Bootstrap started: `$(Get-Date)"
 
 # Set network profile to Private (suppress location dialog)
 Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
+
+# UX defaults for the autologon admin profile (idempotent)
+reg.exe add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v "HideFileExt" /t REG_DWORD /d 0 /f | Out-Null
+reg.exe add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Search" /v "SearchboxTaskbarMode" /t REG_DWORD /d 0 /f | Out-Null
+reg.exe add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v "TaskbarDa" /t REG_DWORD /d 0 /f | Out-Null
+reg.exe add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v "TaskbarMn" /t REG_DWORD /d 0 /f | Out-Null
+
+# Power tweak: disable sleep, keep hibernate enabled
+powercfg -X -standby-timeout-ac 0
+powercfg -X -standby-timeout-dc 0
 
 # Set SAN policy to OnlineAll so VHDX disks come up online after every reboot
 Set-StorageSetting -NewDiskPolicy OnlineAll -ErrorAction SilentlyContinue
