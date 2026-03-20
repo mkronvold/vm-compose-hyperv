@@ -1855,9 +1855,17 @@ function Invoke-VMCopy {
         [string]$Destination
     )
 
+    function Test-IsVmPath {
+        param([string]$PathValue)
+        # Treat drive-letter and UNC paths as HOST paths, not vmname:path.
+        if ($PathValue -match '^[A-Za-z]:[\\/]') { return $false }      # C:\... or C:/...
+        if ($PathValue -match '^\\\\')           { return $false }      # \\server\share...
+        return ($PathValue -match '^([^:]+):(.+)$')                      # vmname:path
+    }
+
     # Detect which side is the VM (format: vmname:path)
-    $srcIsVm  = $Source      -match '^([^:]+):(.+)$'
-    $destIsVm = $Destination -match '^([^:]+):(.+)$'
+    $srcIsVm  = Test-IsVmPath $Source
+    $destIsVm = Test-IsVmPath $Destination
 
     if ($srcIsVm -and $destIsVm) {
         Write-Host "ERROR: Both source and destination cannot be VM paths." -ForegroundColor Red; return
