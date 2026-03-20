@@ -158,6 +158,40 @@ Output includes: VM state, IP, Containers feature, Docker Engine version, persis
 
 ---
 
+## Named Persistent Volumes (per-VM application data)
+
+Add to `storage:` section in vmstack.yaml using `pv-<vmname>` naming:
+
+```yaml
+storage:
+  pv-solr:
+    path: "storage/pv-solr.vhdx"
+    size_gb: 100
+
+vms:
+  solr:
+    mount:
+      - pv-solr
+```
+
+Then use the same `storage shared` commands (they appear with type `named-pv` in `ls`):
+
+```powershell
+# List all storage including named PVs
+./vm-compose.ps1 storage shared ls
+
+# Mount a named PV on the host for direct access
+./vm-compose.ps1 storage shared localmount pv-solr
+
+# Dismount
+./vm-compose.ps1 storage shared localunmount pv-solr
+
+# Health check
+./vm-compose.ps1 storage shared health pv-solr
+```
+
+---
+
 ## Shared Storage
 
 ```powershell

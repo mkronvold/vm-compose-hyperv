@@ -336,61 +336,82 @@ vms:
 
 # Storage
 
-Hyper‑V Compose supports two types of storage: **shared volumes** and **persistent volumes (PVs)**.
+Hyper‑V Compose supports three types of storage.
+
+## Docker Persistent Volumes (auto)
+
+Each VM automatically gets a dedicated VHDX for Docker data (mounted as `P:` inside the VM, configured as Docker's `data-root`). Sized via `persistent_disk_gb` in vmstack.yaml. No configuration needed — created and attached during `up`.
+
+```
+./vm-compose.ps1 storage pv ls [vm]                  # list all Docker PVs
+./vm-compose.ps1 storage pv create <vm>              # create VHDX
+./vm-compose.ps1 storage pv destroy <vm>             # delete VHDX
+./vm-compose.ps1 storage pv localmount <vm> [P]      # mount on host
+./vm-compose.ps1 storage pv localunmount <vm>        # dismount from host
+./vm-compose.ps1 storage pv health [vm]              # health check
+```
+
+## Named Persistent Volumes (per-VM data)
+
+For application data that belongs to a single VM, define named volumes in the `storage:` section using the `pv-<vmname>` naming convention, then reference them in `mount:`:
+
+```yaml
+storage:
+  pv-solr:
+    path: "storage/pv-solr.vhdx"
+    size_gb: 100
+  pv-nnta:
+    path: "storage/pv-nnta.vhdx"
+    size_gb: 50
+
+vms:
+  solr:
+    mount:
+      - pv-solr
+  nnta:
+    mount:
+      - pv-nnta
+```
+
+VHDXes are **auto-created** during `up`. The `pv-` prefix causes them to be labeled **named-pv** (vs **shared**) in `storage shared ls`.
+
+### Named PV commands
+
+```
+./vm-compose.ps1 storage shared ls                   # lists named-pv entries alongside shared
+./vm-compose.ps1 storage shared localmount pv-solr   # mount on host (default S:)
+./vm-compose.ps1 storage shared localunmount pv-solr # dismount from host
+./vm-compose.ps1 storage shared health pv-solr       # health check
+```
 
 ## Shared Storage
 
-Shared VHDXes are defined in `vmstack.yaml` and can be attached to multiple VMs simultaneously:
+Shared VHDXes can be attached to **multiple VMs simultaneously**:
 
 ```yaml
 storage:
   shareddata:
     path: "storage/shareddata.vhdx"
     size_gb: 100
-```
 
-Mount storage on VMs via the `attach:` key:
-
-```yaml
 vms:
   winhost1:
-    attach:
+    mount:
+      - shareddata
+  winhost2:
+    mount:
       - shareddata
 ```
-
-Shared VHDXes are **auto-created** during `up` if they don't exist.
 
 ### Shared storage commands
 
 ```
-./vm-compose.ps1 storage shared ls                   # list shared volumes
+./vm-compose.ps1 storage shared ls                   # list all volumes (shared + named-pv)
 ./vm-compose.ps1 storage shared localmount <name>    # mount on host (default S:)
 ./vm-compose.ps1 storage shared localunmount <name>  # dismount from host
 ./vm-compose.ps1 storage shared health [name]        # health check
-```
-
-### Runtime mount / unmount (to a VM)
-
-Hot-add or remove a storage disk from a running VM:
-
-```
-./vm-compose.ps1 mount winhost1 shareddata
-./vm-compose.ps1 unmount winhost1 shareddata
-```
-
-## Persistent Volumes (PVs)
-
-Each VM gets a dedicated persistent VHDX (mounted as `P:` inside the VM) that stores Docker images, containers, and volumes. VMs can be deleted and recreated without losing container data.
-
-### Persistent volume commands
-
-```
-./vm-compose.ps1 storage pv ls [vm]                  # list all PVs
-./vm-compose.ps1 storage pv create <vm>              # create VHDX
-./vm-compose.ps1 storage pv destroy <vm>             # delete VHDX
-./vm-compose.ps1 storage pv localmount <vm> [P]      # mount on host
-./vm-compose.ps1 storage pv localunmount <vm>        # dismount from host
-./vm-compose.ps1 storage pv health [vm]              # health check
+./vm-compose.ps1 mount winhost1 shareddata           # hot-add to a running VM
+./vm-compose.ps1 unmount winhost1 shareddata         # remove from a running VM
 ```
 
 ---

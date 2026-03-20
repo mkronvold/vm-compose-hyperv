@@ -18,6 +18,15 @@ storage:
   shareddata:
     path: "storage/shareddata.vhdx"
     size_gb: 100
+  # Named persistent volumes — one per VM, for application data.
+  # Use the pv-<vmname> naming convention to keep them easy to identify.
+  # These are created automatically on `up` and attached via mount: below.
+  pv-winhost1:
+    path: "storage/pv-winhost1.vhdx"
+    size_gb: 50
+  pv-winhost2:
+    path: "storage/pv-winhost2.vhdx"
+    size_gb: 30
 
 vms:
   winhost1:
@@ -34,6 +43,7 @@ vms:
     mac_address: "00:15:5D:AB:CD:01"   # optional — omit for dynamic MAC
     mount:
       - shareddata
+      - pv-winhost1
 
   winhost2:
     iso: "C:/ISOs/SERVER_EVAL_x64FRE_en-us.iso"
@@ -45,3 +55,4 @@ vms:
     # mac_address: "00:15:5D:AB:CD:02"   # uncomment to pin MAC
     mount:
       - shareddata
+      - pv-winhost2

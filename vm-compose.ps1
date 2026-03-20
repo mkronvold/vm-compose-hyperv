@@ -1527,6 +1527,7 @@ function Invoke-SharedStorageCommand {
             if (-not $stack.storage) { Write-Host "No storage: section in $ConfigFile" -ForegroundColor Yellow; return }
             $cols = @(
                 @{L='Name';      E={ $_.Name }},
+                @{L='Type';      E={ if ($_.Name -match '^pv-') { 'named-pv' } else { 'shared' } }},
                 @{L='Path';      E={ Resolve-StoragePath $_.Value.path }},
                 @{L='VirtGB';    E={ $_.Value.size_gb }},
                 @{L='UsedGB';    E={
@@ -1635,7 +1636,8 @@ function Invoke-SharedStorageCommand {
                 $p = Resolve-StoragePath $entry.Value.path
                 $exists = Test-Path $p
                 Write-Host ""
-                Write-Host "  Shared Storage: $($entry.Key)" -ForegroundColor Cyan
+                $typeLabel = if ($entry.Key -match '^pv-') { 'Named PV' } else { 'Shared Storage' }
+                Write-Host "  ${typeLabel}: $($entry.Key)" -ForegroundColor Cyan
                 if (-not $exists) { Write-Host "  [!] VHDX NOT FOUND: $p" -ForegroundColor Red; continue }
                 $usedGB = [math]::Round((Get-Item $p).Length / 1GB, 2)
                 try { $vhd = Get-VHD -Path $p -ErrorAction SilentlyContinue } catch { $vhd = $null }
