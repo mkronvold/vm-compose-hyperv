@@ -137,6 +137,9 @@ Output includes: VM state, IP, Containers feature, Docker Engine version, persis
 # Copy a directory from host to VM
 ./vm-compose.ps1 cp C:\data\ solr:C:\data\
 
+# Copy a host Docker project folder into a VM persistent volume (P:)
+./vm-compose.ps1 cp C:\docker\enshrouded-docker\ solr:P:\enshrouded-docker\
+
 # Copy a file from VM to host (prompts for credentials inside the VM)
 ./vm-compose.ps1 cp solr:C:\Setup\bootstrap.log .
 ```
