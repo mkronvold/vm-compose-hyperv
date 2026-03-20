@@ -876,6 +876,45 @@ if (-not (Test-Path `$composePluginPath)) {
     Invoke-WebRequest -UseBasicParsing -Uri `$composeAsset.browser_download_url -OutFile `$composePluginPath
 }
 
+# Ensure winget is installed first (best-effort)
+`$wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
+if (-not `$wingetCmd) {
+    Write-Host 'winget not found. Installing App Installer...'
+    `$wingetRelease = Invoke-RestMethod 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing
+    `$wingetBundleAsset = @(`$wingetRelease.assets | Where-Object { `$_.name -eq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle' }) | Select-Object -First 1
+    `$xamlAsset = @(`$wingetRelease.assets | Where-Object { `$_.name -match '^Microsoft\.UI\.Xaml\..*_x64\.appx$' }) | Select-Object -First 1
+    if (`$wingetBundleAsset) {
+        `$vclibsUrl = 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx'
+        `$vclibsPath = 'C:\Setup\Microsoft.VCLibs.x64.14.00.Desktop.appx'
+        `$xamlPath = 'C:\Setup\Microsoft.UI.Xaml.x64.appx'
+        `$wingetBundlePath = 'C:\Setup\Microsoft.DesktopAppInstaller.msixbundle'
+
+        Invoke-WebRequest -UseBasicParsing -Uri `$vclibsUrl -OutFile `$vclibsPath
+        Add-AppxPackage -Path `$vclibsPath -ErrorAction SilentlyContinue
+
+        if (`$xamlAsset) {
+            Invoke-WebRequest -UseBasicParsing -Uri `$xamlAsset.browser_download_url -OutFile `$xamlPath
+            Add-AppxPackage -Path `$xamlPath -ErrorAction SilentlyContinue
+        }
+
+        Invoke-WebRequest -UseBasicParsing -Uri `$wingetBundleAsset.browser_download_url -OutFile `$wingetBundlePath
+        Add-AppxPackage -Path `$wingetBundlePath -ErrorAction SilentlyContinue
+        `$wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
+    } else {
+        Write-Warning 'Could not find App Installer bundle in microsoft/winget-cli release assets.'
+    }
+}
+
+# Install Git + GitHub tooling via winget (best-effort, idempotent)
+if (`$wingetCmd) {
+    foreach (`$pkgId in @('Git.Git','GitHub.cli','GitHub.GitLFS','GitHub.Copilot')) {
+        Write-Host "Installing `$pkgId via winget..."
+        winget install --id `$pkgId -e --source winget --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
+    }
+} else {
+    Write-Warning 'winget is not available; skipping Git/GitHub tool installation.'
+}
+
 $dismConversionBlock
 Write-Host "Bootstrap complete: `$(Get-Date)"
 Stop-Transcript | Out-Null
