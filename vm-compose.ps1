@@ -32,7 +32,7 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","docker","docker-test","validate","version","mount","unmount","storage","localmount","localunmount","cp","copy","metrics","web","dashboard","getlog","note","help")]
+    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","docker","docker-compose","docker-test","validate","version","mount","unmount","storage","localmount","localunmount","cp","copy","metrics","web","dashboard","getlog","note","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -72,7 +72,8 @@ COMMANDS
   inspect <vm>    Show detailed info for a VM (aliases: describe, show)
   logs <vm>       Show application event log from a VM
   exec <vm> <cmd> Run a command inside a VM
-  docker <vm> <docker args...>  Run a docker command inside a VM
+  docker <vm> <docker args...>         Run a docker command inside a VM
+  docker-compose <vm> <docker args...> Alias for docker (same pass-through)
   ps <vm>         List processes inside a VM
   ssh <vm>        Open an interactive shell inside a VM
   ip <vm>         Print the VM's IP address
@@ -124,6 +125,7 @@ $CommandHelp = @{
     "top"      = "top <vm>`n  Live CPU/memory loop (Ctrl+C to exit)."
     "health"       = "health [<vm>]`n  Health check: VM state, IP assignment, Docker responsiveness. Omit <vm> for all."
     "docker"       = "docker <vm> <docker args...>`n  Run a docker command inside a VM via PowerShell Direct.`n  Example: ./vm-compose.ps1 docker solr ps`n  Example: ./vm-compose.ps1 docker solr run --rm mcr.microsoft.com/windows/nanoserver:ltsc2022 cmd /c echo hello`n  Note: args that match PowerShell parameter names (e.g. -Force) must be quoted."
+    "docker-compose" = "docker-compose <vm> <docker args...>`n  Alias for the docker command. Passes all arguments to docker inside the VM.`n  Example: ./vm-compose.ps1 docker-compose solr ps`n  Example: ./vm-compose.ps1 docker-compose solr run --rm image cmd /c echo hello"
     "docker-test"  = "docker-test <vm>`n  Pull and run a nanoserver hello-world container inside a VM.`n  Auto-detects the OS build to select the correct image tag (ltsc2022, ltsc2025).`n  Starts the Docker service if it is stopped."
     "validate" = "validate`n  Lint vmstack.yaml for missing required fields and broken references."
     "version"  = "version`n  Print version, PowerShell version, and active config file path."
@@ -734,8 +736,11 @@ if (-not (Get-Service docker -ErrorAction SilentlyContinue)) {
     `$env:Path = "`$env:Path;C:\Program Files\Docker"
     [Environment]::SetEnvironmentVariable('Path', "`$([Environment]::GetEnvironmentVariable('Path','Machine'));C:\Program Files\Docker", 'Machine')
     dockerd --register-service
+    # Delayed-auto start: service starts ~2 min after boot, after storage is fully mounted.
+    # Failure recovery: auto-restart on crash (5s, 10s, 30s intervals).
+    sc.exe config docker start= delayed-auto | Out-Null
+    sc.exe failure docker reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
     Start-Service docker
-    Set-Service docker -StartupType Automatic
 }
 
 $dismConversionBlock
@@ -2194,6 +2199,24 @@ switch ($Command) {
             Write-Host "Usage: ./vm-compose.ps1 docker-test <vmName>" -ForegroundColor Yellow
         } else {
             Invoke-DockerTest $VmName
+        }
+    }
+
+    "docker-compose" {
+        Assert-Admin
+        if (-not $VmName) {
+            Write-Host "Usage: ./vm-compose.ps1 docker-compose <vmName> <docker args...>" -ForegroundColor Yellow
+        } else {
+            $allDockerArgs = @()
+            if ($ExecCommand) { $allDockerArgs += $ExecCommand }
+            if ($StorageName) { $allDockerArgs += $StorageName }
+            if ($ExtraArg)    { $allDockerArgs += $ExtraArg }
+            if ($DockerArgs)  { $allDockerArgs += $DockerArgs }
+            if (-not $allDockerArgs) {
+                Write-Host "Usage: ./vm-compose.ps1 docker-compose <vmName> <docker args...>" -ForegroundColor Yellow
+            } else {
+                Invoke-DockerInVM $VmName $allDockerArgs
+            }
         }
     }
 

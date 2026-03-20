@@ -1,50 +1,32 @@
 # Hyper‑V Compose
 
-Hyper‑V Compose is a **docker‑compose‑like orchestrator** for building and managing Windows Server VMs on Hyper‑V using a declarative YAML file (`vmstack.yaml`).
+Run **Windows containers** on your Windows 11 machine — using the same familiar `docker` and `docker-compose` commands you already know — without hand-building Windows Server VMs.
 
-It gives you a clean, predictable workflow:
+**The problem:** Windows 10/11 cannot run real Windows containers. Docker Desktop on Windows 11 requires Hyper‑V isolation, which breaks CPU/memory limits and is unreliable for production workloads. Windows Server runs Windows containers natively, honors resource limits correctly, and is the platform containers are designed for.
+
+**The solution:** Hyper‑V Compose spins up fully-configured Windows Server VMs on your Hyper‑V host with a single command. Docker Engine installs automatically. You get a clean `docker`-like CLI — `up`, `down`, `restart`, `health`, `exec`, `docker` pass-through — without ever opening Hyper‑V Manager or editing an XML file.
 
 ```
-./vm-compose.ps1 up [-DryRun]
-./vm-compose.ps1 down [-DryRun]
-./vm-compose.ps1 restart [-DryRun]
-./vm-compose.ps1 destroy [-DryRun]
-./vm-compose.ps1 status
-./vm-compose.ps1 inspect <vm>
-./vm-compose.ps1 logs <vm>
-./vm-compose.ps1 exec <vm> "<command>"
-./vm-compose.ps1 docker <vm> <docker args...>
-./vm-compose.ps1 docker-test <vm>
-./vm-compose.ps1 ps <vm>
-./vm-compose.ps1 ssh <vm>
-./vm-compose.ps1 ip <vm>
-./vm-compose.ps1 top <vm>
+./vm-compose.ps1 up
+./vm-compose.ps1 docker solr run --rm mcr.microsoft.com/windows/nanoserver:ltsc2022 cmd /c echo hello
 ./vm-compose.ps1 health
-./vm-compose.ps1 validate
-./vm-compose.ps1 version
-./vm-compose.ps1 mount <vm> <storageName>
-./vm-compose.ps1 unmount <vm> <storageName>
-./vm-compose.ps1 storage shared ls
-./vm-compose.ps1 storage pv ls
-./vm-compose.ps1 cp <src> <dst>
-./vm-compose.ps1 note <show|add|edit> <vm>
-./vm-compose.ps1 getlog <vm>
-./vm-compose.ps1 metrics
-./vm-compose.ps1 web
 ```
+
+### Key features
+
+- **Declarative YAML config** (`vmstack.yaml`) — define VMs, networks, and storage like Docker Compose
+- **Fully automated provisioning** — OS install via `Autounattend.xml`, Docker Engine from static binaries, no Mirantis license required
+- **Persistent Docker storage** — each VM gets a dedicated VHDX (`P:\docker-data`) that survives `destroy`
+- **Shared storage** — attach a single VHDX to multiple VMs simultaneously
+- **Named persistent volumes** — per-VM app data VHDXes with a `pv-<name>` convention
+- **`docker` / `docker-compose` pass-through** — run any docker command inside a VM without quoting tricks
+- **Web dashboard** — live VM table with start/stop/restart buttons at `http://localhost:8080`
+- **Prometheus metrics** — per-VM CPU, memory, Docker state, container counts, storage sizes on `:9090/metrics`
+- **PowerShell Direct** — `exec`, `ps`, `ssh`, `cp`, `logs`, `health` with no SSH keys required
 
 > **Note:** Most VM-interaction commands require running as **Administrator** (Hyper-V API requires it). The CLI will tell you if you need to elevate.
 
-Each VM is fully automated:
 
-- Windows Server installs via `Autounattend.xml`
-- **Docker Engine** installs automatically from static binaries at `download.docker.com` — no Mirantis Container Runtime or license required
-- Docker is configured to use a **persistent VHDX** (`P:\docker-data`)
-- Networks are auto‑created if missing
-- Shared storage disks can be attached to multiple VMs
-- PowerShell Direct provides logs, exec, ps, ssh, and health checks
-
----
 
 # Example `vmstack.yaml`
 
@@ -218,7 +200,12 @@ Shows:
 ./vm-compose.ps1 docker winhost1 run --rm mcr.microsoft.com/windows/nanoserver:ltsc2022 cmd /c echo hello
 ```
 
-Passes all arguments directly to `docker` inside the VM via PowerShell Direct. Safer and more convenient than quoting the full command string with `exec`.
+`docker-compose` is an alias for the same pass-through:
+```
+./vm-compose.ps1 docker-compose winhost1 ps
+```
+
+Passes all arguments directly to `docker` inside the VM via PowerShell Direct.
 
 > **Tip:** args that match PowerShell parameter names (e.g. `-Force`) should be quoted: `'-Force'`
 
@@ -476,20 +463,6 @@ Features:
 - Windows Server ISO (2022 or 2025 recommended)  
 - [Pode](https://github.com/Badgerati/Pode) module (auto-installed by `vm-dashboard.ps1`)  
 - No Docker license required — uses open-source Docker Engine static binaries  
-
----
-
-# Why this exists
-
-Windows 10/11 cannot run real Windows containers.  
-Windows Server can.  
-This system gives you:
-
-- reproducible VM builds  
-- persistent container storage  
-- a compose-like workflow  
-- fully automated provisioning  
-- disposable compute, durable storage  
 
 ---
 
