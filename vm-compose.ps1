@@ -879,37 +879,59 @@ if (-not (Test-Path `$composePluginPath)) {
 # Ensure winget is installed first (best-effort)
 `$wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
 if (-not `$wingetCmd) {
-    Write-Host 'winget not found. Installing App Installer...'
+    Write-Host 'winget not found. Trying Repair-WinGetPackageManager...'
+    try {
+        Install-PackageProvider -Name NuGet -Force | Out-Null
+        Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery -Scope AllUsers -AllowClobber | Out-Null
+        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+        Repair-WinGetPackageManager -AllUsers -Latest -ErrorAction Stop | Out-Null
+    } catch {
+        Write-Warning "Repair-WinGetPackageManager failed: `$(`$_.Exception.Message)"
+    }
+    `$wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
+}
+
+if (-not `$wingetCmd) {
+    Write-Host 'winget still not found. Installing App Installer bundle + dependencies...'
     `$wingetRelease = Invoke-RestMethod 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing
     `$wingetBundleAsset = @(`$wingetRelease.assets | Where-Object { `$_.name -eq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle' }) | Select-Object -First 1
-    `$xamlAsset = @(`$wingetRelease.assets | Where-Object { `$_.name -match '^Microsoft\.UI\.Xaml\..*_x64\.appx$' }) | Select-Object -First 1
-    if (`$wingetBundleAsset) {
-        `$vclibsUrl = 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx'
-        `$vclibsPath = 'C:\Setup\Microsoft.VCLibs.x64.14.00.Desktop.appx'
-        `$xamlPath = 'C:\Setup\Microsoft.UI.Xaml.x64.appx'
+    `$wingetDepsAsset = @(`$wingetRelease.assets | Where-Object { `$_.name -eq 'DesktopAppInstaller_Dependencies.zip' }) | Select-Object -First 1
+    if (`$wingetBundleAsset -and `$wingetDepsAsset) {
         `$wingetBundlePath = 'C:\Setup\Microsoft.DesktopAppInstaller.msixbundle'
+        `$wingetDepsZipPath = 'C:\Setup\DesktopAppInstaller_Dependencies.zip'
+        `$wingetDepsDir = 'C:\Setup\DesktopAppInstaller_Dependencies'
 
-        Invoke-WebRequest -UseBasicParsing -Uri `$vclibsUrl -OutFile `$vclibsPath
-        Add-AppxPackage -Path `$vclibsPath -ErrorAction SilentlyContinue
-
-        if (`$xamlAsset) {
-            Invoke-WebRequest -UseBasicParsing -Uri `$xamlAsset.browser_download_url -OutFile `$xamlPath
-            Add-AppxPackage -Path `$xamlPath -ErrorAction SilentlyContinue
-        }
+        Invoke-WebRequest -UseBasicParsing -Uri `$wingetDepsAsset.browser_download_url -OutFile `$wingetDepsZipPath
+        if (Test-Path `$wingetDepsDir) { Remove-Item `$wingetDepsDir -Recurse -Force -ErrorAction SilentlyContinue }
+        Expand-Archive -Path `$wingetDepsZipPath -DestinationPath `$wingetDepsDir -Force
+        `$depPkgs = @(Get-ChildItem `$wingetDepsDir -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { `$_.Extension -in @('.appx', '.msix', '.appxbundle', '.msixbundle') -and `$_.Name -match 'x64|neutral' } |
+            Select-Object -ExpandProperty FullName)
 
         Invoke-WebRequest -UseBasicParsing -Uri `$wingetBundleAsset.browser_download_url -OutFile `$wingetBundlePath
-        Add-AppxPackage -Path `$wingetBundlePath -ErrorAction SilentlyContinue
+        if (`$depPkgs.Count -gt 0) {
+            Add-AppxPackage -Path `$wingetBundlePath -DependencyPath `$depPkgs -ErrorAction SilentlyContinue
+        } else {
+            Add-AppxPackage -Path `$wingetBundlePath -ErrorAction SilentlyContinue
+        }
+        # Sometimes package installs but winget alias registration lags.
+        Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' -ErrorAction SilentlyContinue
         `$wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
     } else {
-        Write-Warning 'Could not find App Installer bundle in microsoft/winget-cli release assets.'
+        Write-Warning 'Could not find App Installer bundle/dependency assets in microsoft/winget-cli release assets.'
     }
 }
 
 # Install Git + GitHub tooling via winget (best-effort, idempotent)
-if (`$wingetCmd) {
+`$wingetExe = if (`$wingetCmd) { `$wingetCmd.Source } else { `$null }
+if (-not `$wingetExe) {
+    `$candidateWingetExe = Join-Path `$env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+    if (Test-Path `$candidateWingetExe) { `$wingetExe = `$candidateWingetExe }
+}
+if (`$wingetExe) {
     foreach (`$pkgId in @('Git.Git','GitHub.cli','GitHub.GitLFS','GitHub.Copilot')) {
         Write-Host "Installing `$pkgId via winget..."
-        winget install --id `$pkgId -e --source winget --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
+        & `$wingetExe install --id `$pkgId -e --source winget --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
     }
 } else {
     Write-Warning 'winget is not available; skipping Git/GitHub tool installation.'
@@ -1310,7 +1332,8 @@ function Test-AllVMs {
         }
 
         try {
-            $checks = Invoke-Command -VMName $vm -Credential (Get-VMCredential $vm) -ScriptBlock {
+            $checks = Invoke-Command -VMName $vm -Credential (Get-VMCredential $vm) -ArgumentList $vm -ScriptBlock {
+                param([string]$remoteVmName)
                 # Ensure Docker binary path is in PATH for this session
                 $dockerBin = 'C:\Program Files\Docker'
                 if ($env:Path -notlike "*$dockerBin*") { $env:Path = "$env:Path;$dockerBin" }
@@ -1325,9 +1348,6 @@ function Test-AllVMs {
                 # Containers feature
                 $feature = (Get-WindowsFeature -Name Containers -ErrorAction SilentlyContinue).InstallState -eq 'Installed'
 
-                # Persistent data disk (DockerData volume)
-                $dockerVol = Get-Volume -FileSystemLabel 'DockerData' -ErrorAction SilentlyContinue
-
                 # Docker daemon.json
                 $daemonJson = Test-Path 'C:\ProgramData\docker\config\daemon.json'
 
@@ -1338,11 +1358,32 @@ function Test-AllVMs {
                     $dataRoot = $cfg.'data-root'
                 }
 
-                # Shared storage volumes (any non-OS, non-DockerData volumes)
+                # Persistent data volume (legacy label DockerData or named pv-<vm>)
+                $dockerVol = $null
+                $dockerDataDrive = $null
+                if ($dataRoot -and $dataRoot -match '^(?<dl>[A-Za-z]):\\') {
+                    $dockerDataDrive = $Matches['dl'].ToUpper()
+                    $dockerVol = Get-Volume -DriveLetter $dockerDataDrive -ErrorAction SilentlyContinue
+                }
+                if (-not $dockerVol) {
+                    foreach ($label in @("pv-$remoteVmName", 'DockerData')) {
+                        $dockerVol = Get-Volume -FileSystemLabel $label -ErrorAction SilentlyContinue | Select-Object -First 1
+                        if ($dockerVol) {
+                            if ($dockerVol.DriveLetter) { $dockerDataDrive = "$($dockerVol.DriveLetter)".ToUpper() }
+                            break
+                        }
+                    }
+                }
+                if (-not $dockerDataDrive -and $dockerVol -and $dockerVol.DriveLetter) {
+                    $dockerDataDrive = "$($dockerVol.DriveLetter)".ToUpper()
+                }
+
+                # Shared storage volumes (any non-OS, non-Docker data volume)
                 $sharedVols = Get-Volume -ErrorAction SilentlyContinue |
                     Where-Object { $_.DriveType -eq 'Fixed' -and $_.DriveLetter -and
-                                   $_.FileSystemLabel -notin @('','DockerData') -and
-                                   $_.DriveLetter -ne 'C' }
+                                   $_.FileSystemLabel -ne '' -and
+                                   $_.DriveLetter -ne 'C' -and
+                                   (-not $dockerDataDrive -or "$($_.DriveLetter)".ToUpper() -ne $dockerDataDrive) }
 
                 # Windows Eval license — days remaining (GracePeriodRemaining is in minutes)
                 $evalDays = $null
@@ -1378,7 +1419,7 @@ function Test-AllVMs {
 
             & $fmt $checks.FeatureOk     'Containers feature'  $(if ($checks.FeatureOk) { 'Installed' } else { 'MISSING' })
             & $fmt $checks.DockerOk      'Docker Engine'       $(if ($checks.DockerVersion) { "v$($checks.DockerVersion)" } else { 'NOT RUNNING' })
-            & $fmt ($null -ne $checks.DockerVolume) 'DockerData volume'  $(if ($checks.DockerVolume) { $checks.DockerVolume } else { 'NOT FOUND (check disk offline policy)' })
+            & $fmt ($null -ne $checks.DockerVolume) 'Docker data volume' $(if ($checks.DockerVolume) { $checks.DockerVolume } else { 'NOT FOUND (check disk offline policy)' })
             & $fmt $checks.DaemonJson    'daemon.json'         $(if ($checks.DataRoot) { "data-root=$($checks.DataRoot)" } else { 'missing or unconfigured' })
             if ($checks.SharedVols) {
                 foreach ($sv in $checks.SharedVols) {
