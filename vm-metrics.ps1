@@ -80,6 +80,16 @@ function Get-PrometheusMetrics {
     $lines += "# TYPE hyperv_container_mem_usage_bytes gauge"
     $lines += "# HELP hyperv_container_mem_limit_bytes Container memory limit in bytes"
     $lines += "# TYPE hyperv_container_mem_limit_bytes gauge"
+    $lines += "# HELP hyperv_vm_vcpu_count Number of virtual CPUs assigned to the VM"
+    $lines += "# TYPE hyperv_vm_vcpu_count gauge"
+    $lines += "# HELP hyperv_vm_checkpoint_count Number of checkpoints (snapshots) for the VM"
+    $lines += "# TYPE hyperv_vm_checkpoint_count gauge"
+    $lines += "# HELP hyperv_vm_docker_version_info Docker Engine version (value always 1; read the 'version' label)"
+    $lines += "# TYPE hyperv_vm_docker_version_info gauge"
+    $lines += "# HELP hyperv_storage_bytes_used Bytes currently used by a storage VHDX file on the host"
+    $lines += "# TYPE hyperv_storage_bytes_used gauge"
+    $lines += "# HELP hyperv_storage_bytes_total Configured maximum size in bytes of a storage VHDX"
+    $lines += "# TYPE hyperv_storage_bytes_total gauge"
 
     foreach ($vmName in $stack.vms.Keys) {
         $vmCfg = $stack.vms[$vmName]
@@ -98,6 +108,8 @@ function Get-PrometheusMetrics {
             $lines += "hyperv_vm_docker_running_count{vm=`"$vmName`"} -1"
             $lines += "hyperv_vm_pv_bytes_total{vm=`"$vmName`"} -1"
             $lines += "hyperv_vm_pv_bytes_free{vm=`"$vmName`"} -1"
+            $lines += "hyperv_vm_vcpu_count{vm=`"$vmName`"} 0"
+            $lines += "hyperv_vm_checkpoint_count{vm=`"$vmName`"} 0"
             continue
         }
 
@@ -107,6 +119,8 @@ function Get-PrometheusMetrics {
         $memAssigned = $vm.MemoryAssigned
         $memStartup  = $vm.MemoryStartup
         $uptimeSec   = if ($vm.Uptime) { [math]::Floor($vm.Uptime.TotalSeconds) } else { 0 }
+        $vcpuCount        = $vm.ProcessorCount
+        $checkpointCount  = @(Get-VMCheckpoint -VMName $vmName -ErrorAction SilentlyContinue).Count
 
         $ip = (Get-VMNetworkAdapter -VMName $vmName).IPAddresses |
               Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' } |
@@ -114,6 +128,7 @@ function Get-PrometheusMetrics {
         $ipAssigned = if ($ip) { 1 } else { 0 }
 
         $dockerRunning    = 0
+        $dockerVersion    = ''
         $evalDays         = -1
         $containerCount   = -1
         $runningCount     = -1
@@ -186,9 +201,11 @@ function Get-PrometheusMetrics {
                         }
                         $disk = Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='P:'" -ErrorAction SilentlyContinue
                         if ($disk) { $pvTotal = [long]$disk.Size; $pvFree = [long]$disk.FreeSpace }
+                        $dockerVer = (& docker version --format '{{.Server.Version}}' 2>$null) -join ''
                     }
                     [PSCustomObject]@{
                         Docker         = $dockerSvc
+                        DockerVersion  = if ($dockerSvc) { $dockerVer } else { '' }
                         EvalMins       = if ($slp) { $slp.GracePeriodRemaining } else { -1 }
                         ContainerCount = $cCount
                         RunningCount   = $rCount
@@ -203,6 +220,7 @@ function Get-PrometheusMetrics {
             try {
                 $result         = Invoke-Command @icArgs
                 $dockerRunning  = if ($result.Docker) { 1 } else { 0 }
+                $dockerVersion  = $result.DockerVersion
                 $evalDays       = if ($result.EvalMins -ge 0) { [math]::Floor($result.EvalMins / 1440) } else { -1 }
                 $containerCount = $result.ContainerCount
                 $runningCount   = $result.RunningCount
@@ -218,8 +236,13 @@ function Get-PrometheusMetrics {
         $lines += "hyperv_vm_memory_assigned_bytes{vm=`"$vmName`"} $memAssigned"
         $lines += "hyperv_vm_memory_startup_bytes{vm=`"$vmName`"} $memStartup"
         $lines += "hyperv_vm_uptime_seconds{vm=`"$vmName`"} $uptimeSec"
+        $lines += "hyperv_vm_vcpu_count{vm=`"$vmName`"} $vcpuCount"
+        $lines += "hyperv_vm_checkpoint_count{vm=`"$vmName`"} $checkpointCount"
         $lines += "hyperv_vm_ip_assigned{vm=`"$vmName`"} $ipAssigned"
         $lines += "hyperv_vm_docker_running{vm=`"$vmName`"} $dockerRunning"
+        if ($dockerRunning -eq 1 -and $dockerVersion) {
+            $lines += "hyperv_vm_docker_version_info{vm=`"$vmName`",version=`"$dockerVersion`"} 1"
+        }
         $lines += "hyperv_vm_eval_days_remaining{vm=`"$vmName`"} $evalDays"
         $lines += "hyperv_vm_docker_container_count{vm=`"$vmName`"} $containerCount"
         $lines += "hyperv_vm_docker_running_count{vm=`"$vmName`"} $runningCount"
@@ -231,6 +254,26 @@ function Get-PrometheusMetrics {
             $lines += "hyperv_container_cpu_percent{vm=`"$vmName`",container=`"$cl`"} $($c.CpuPct)"
             $lines += "hyperv_container_mem_usage_bytes{vm=`"$vmName`",container=`"$cl`"} $($c.MemUsage)"
             $lines += "hyperv_container_mem_limit_bytes{vm=`"$vmName`",container=`"$cl`"} $($c.MemLimit)"
+        }
+    }
+
+    # Shared storage metrics (host-side — no VM call needed)
+    if ($stack.storage) {
+        foreach ($entry in $stack.storage.GetEnumerator()) {
+            $sName = $entry.Key
+            $sPath = $entry.Value.path
+            if (-not [System.IO.Path]::IsPathRooted($sPath)) {
+                $sPath = Join-Path $scriptDir $sPath
+            }
+            $sType          = if ($sName -match '^pv-') { 'named-pv' } else { 'shared' }
+            $configuredBytes = [long]($entry.Value.size_gb * 1GB)
+            if (Test-Path $sPath) {
+                $usedBytes = [long](Get-Item $sPath).Length
+                $lines += "hyperv_storage_bytes_used{name=`"$sName`",type=`"$sType`"} $usedBytes"
+            } else {
+                $lines += "hyperv_storage_bytes_used{name=`"$sName`",type=`"$sType`"} -1"
+            }
+            $lines += "hyperv_storage_bytes_total{name=`"$sName`",type=`"$sType`"} $configuredBytes"
         }
     }
 
