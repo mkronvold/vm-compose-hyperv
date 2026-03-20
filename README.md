@@ -34,43 +34,46 @@ Run **Windows containers** on your Windows 11 machine — using the same familia
 version: "1"
 
 networks:
-  internal:
-    type: internal
-    switch_name: "hv-int"
-
-  external:
-    type: external
-    switch_name: "Default Switch"
-
   natnet:
-    type: nat
-    switch_name: "hv-nat"
-    subnet: "192.168.200.0/24"
-    gateway: "192.168.200.1"
+    switch_name: "Default Switch"   # built-in NAT/DHCP on Windows 10/11/Server
 
 storage:
+  # Shared VHDX — can be mounted in multiple VMs simultaneously
   shareddata:
     path: "storage/shareddata.vhdx"
     size_gb: 100
 
+  # Named persistent volumes — per-VM application data (pv-<vmname> convention)
+  # Auto-created on `up`; labeled "named-pv" in `storage shared ls`
+  pv-winhost1:
+    path: "storage/pv-winhost1.vhdx"
+    size_gb: 50
+  pv-winhost2:
+    path: "storage/pv-winhost2.vhdx"
+    size_gb: 30
+
 vms:
   winhost1:
-    iso: "D:/ISO/WindowsServer2022.iso"
+    iso: "C:/ISOs/WindowsServer2022.iso"
     memory_gb: 8
     cpus: 4
     os_disk_gb: 80
-    persistent_disk_gb: 50
+    persistent_disk_gb: 50   # auto Docker PV → P:\docker-data inside VM
     network: natnet
-    attach:
+    mount:
       - shareddata
+      - pv-winhost1
 
   winhost2:
-    iso: "D:/ISO/WindowsServer2025.iso"
+    iso: "C:/ISOs/WindowsServer2022.iso"
     memory_gb: 4
     cpus: 2
     os_disk_gb: 60
     persistent_disk_gb: 30
-    network: internal
+    network: natnet
+    mount:
+      - shareddata
+      - pv-winhost2
 ```
 
 ---
