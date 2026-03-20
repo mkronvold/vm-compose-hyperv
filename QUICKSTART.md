@@ -50,7 +50,7 @@ vms:
     memory_gb: 4
     cpus: 2
     os_disk_gb: 60
-    persistent_disk_gb: 30
+    # persistent_disk_gb: 30   # optional legacy Docker PV
     network: natnet
 ```
 
@@ -74,7 +74,7 @@ vms:
 
 What happens:
 1. Resolves the Hyper-V switch for each VM's `network:`
-2. Creates the OS VHDX and persistent VHDX (`P:` drive inside the VM)
+2. Creates the OS VHDX and optional legacy persistent VHDX (`P:` drive) when `persistent_disk_gb` is set
 3. Creates any named storage volumes defined in `storage:`
 4. Generates `Autounattend.xml` and `bootstrap.ps1`
 5. Creates and starts the VM — Windows Server installs unattended (~5–15 min)

@@ -16,7 +16,7 @@ Run **Windows containers** on your Windows 11 machine — using the same familia
 
 - **Declarative YAML config** (`vmstack.yaml`) — define VMs, networks, and storage like Docker Compose
 - **Fully automated provisioning** — OS install via `Autounattend.xml`, Docker Engine from static binaries, Docker Compose plugin (`docker compose`), no Mirantis license required
-- **Persistent Docker storage** — each VM gets a dedicated VHDX (`P:\docker-data`) that survives `destroy`
+- **Optional persistent Docker storage** — set `persistent_disk_gb` to give a VM a dedicated VHDX (`P:\docker-data`) that survives `destroy`
 - **Shared storage** — attach a single VHDX to multiple VMs simultaneously
 - **Named persistent volumes** — per-VM app data VHDXes with a `pv-<name>` convention
 - **`docker` / `docker-compose` pass-through** — run any docker command inside a VM without quoting tricks
@@ -58,7 +58,7 @@ vms:
     memory_gb: 8
     cpus: 4
     os_disk_gb: 80
-    persistent_disk_gb: 50   # auto Docker PV → P:\docker-data inside VM
+    persistent_disk_gb: 50   # optional legacy Docker PV → P:\docker-data inside VM
     network: natnet
     mount:
       - shareddata
@@ -69,7 +69,7 @@ vms:
     memory_gb: 4
     cpus: 2
     os_disk_gb: 60
-    persistent_disk_gb: 30
+    # persistent_disk_gb: 30  # optional
     network: natnet
     mount:
       - shareddata
@@ -88,7 +88,7 @@ vms:
 Creates:
 
 - OS VHDX  
-- Persistent Docker VHDX  
+- Optional persistent Docker VHDX (`persistent_disk_gb` > 0)  
 - Autounattend.xml  
 - bootstrap.ps1  
 - VM with attached disks  
@@ -106,7 +106,7 @@ Creates:
 ./vm-compose.ps1 restart
 ```
 
-## Destroy VMs (persistent disks preserved)
+## Destroy VMs (persistent disks preserved when present)
 ```
 ./vm-compose.ps1 destroy
 ```
@@ -117,7 +117,7 @@ Deletes VM definitions but **keeps**:
 persistent-storage.vhdx
 ```
 
-So Docker images, containers, and volumes survive.
+So Docker images, containers, and volumes survive (for VMs where `persistent_disk_gb` is enabled).
 
 ---
 
@@ -329,9 +329,9 @@ vms:
 
 Hyper‑V Compose supports three types of storage.
 
-## Docker Persistent Volumes (auto)
+## Docker Persistent Volumes (optional legacy)
 
-Each VM automatically gets a dedicated VHDX for Docker data (mounted as `P:` inside the VM, configured as Docker's `data-root`). Sized via `persistent_disk_gb` in vmstack.yaml. No configuration needed — created and attached during `up`.
+If `persistent_disk_gb` is set to a value greater than 0, the VM gets a dedicated legacy VHDX for Docker data (mounted as `P:` inside the VM and configured as Docker's `data-root`). If omitted, the VM is built without this legacy disk.
 
 ```
 ./vm-compose.ps1 storage pv ls [vm]                  # list all Docker PVs

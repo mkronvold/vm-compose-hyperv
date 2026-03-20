@@ -594,6 +594,8 @@ $pvUnmountModal
                 $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
                 $cred  = New-Object PSCredential('administrator', $secpw)
             }
+            $storageName = "pv-$vmName"
+            $labelName = if ($stack.storage -and $stack.storage[$storageName]) { $storageName } else { 'DockerData' }
             $pvPath  = (Join-Path $vmRoot $vmName "persistent-storage.vhdx") -replace '/', '\'
             if (-not (Test-Path $pvPath)) { throw "VHDX not found: $pvPath" }
             $hostDisk = Get-Disk -ErrorAction SilentlyContinue | Where-Object { ($_.Location -replace '/', '\') -ieq $pvPath } | Select-Object -First 1
@@ -602,7 +604,7 @@ $pvUnmountModal
                 Add-VMHardDiskDrive -VMName $vmName -Path $pvPath -ErrorAction Stop
             }
             # Start Docker inside the VM now that P:\docker-data is available again
-            Invoke-VMDockerControl -VmName $vmName -Cred $cred -Action 'start'
+            Invoke-VMDockerControl -VmName $vmName -Cred $cred -Action 'start' -DockerVolumeLabel $labelName -EnsureDaemonConfig
         } catch { }
         Move-PodeResponseUrl -Url "/"
     }
@@ -653,8 +655,10 @@ $pvUnmountModal
                 $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
                 $cred  = New-Object PSCredential('administrator', $secpw)
             }
+            $storageName = "pv-$vmName"
+            $labelName = if ($stack.storage -and $stack.storage[$storageName]) { $storageName } else { 'DockerData' }
             # Stop Docker inside the VM before losing access to P:\docker-data
-            Invoke-VMDockerControl -VmName $vmName -Cred $cred -Action 'stop'
+            Invoke-VMDockerControl -VmName $vmName -Cred $cred -Action 'stop' -DockerVolumeLabel $labelName
             $pvPath  = (Join-Path $vmRoot $vmName "persistent-storage.vhdx") -replace '/', '\'
             $drive = Get-VMDiskForPath -VmName $vmName -StoragePath $pvPath
             if ($drive) { Remove-VMHardDiskDrive -VMHardDiskDrive $drive -ErrorAction Stop }
@@ -881,8 +885,23 @@ $pvUnmountModal
             $alreadyAttached = @(Get-VMsWithDisk $sp | Where-Object { $_ -ne $vmName })
             if ($alreadyAttached.Count -gt 0) { throw "Storage '$storageName' is already attached to VM(s): $($alreadyAttached -join ', ')" }
 
+            $vmCfg = $stack.vms[$vmName]
+            $cred = $null
+            if ($vmCfg -and $vmCfg.admin_password) {
+                $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
+                $cred  = New-Object PSCredential('administrator', $secpw)
+            }
+            $isNamedPvForVm = ($storageName -match '^pv-') -and (($storageName -replace '^pv-','') -ieq $vmName)
+            if ($isNamedPvForVm) {
+                Invoke-VMDockerControl -VmName $vmName -Cred $cred -Action 'stop' -DockerVolumeLabel $storageName
+            }
+
             if (-not (Get-VMDiskForPath -VmName $vmName -StoragePath $sp)) {
                 Add-VMHardDiskDrive -VMName $vmName -Path $sp -ErrorAction Stop
+            }
+
+            if ($isNamedPvForVm) {
+                Invoke-VMDockerControl -VmName $vmName -Cred $cred -Action 'start' -DockerVolumeLabel $storageName -EnsureDaemonConfig
             }
         } catch {
             $routeError = "vmount '$storageName' -> '$vmName': $($_.Exception.Message)"
@@ -906,6 +925,18 @@ $pvUnmountModal
             $rawPath = $stack.storage[$storageName].path
             $sp      = if ([System.IO.Path]::IsPathRooted($rawPath)) { $rawPath } else { Join-Path $vmRoot $rawPath }
             $sp      = $sp -replace '/', '\'
+
+            $vmCfg = $stack.vms[$vmName]
+            $cred = $null
+            if ($vmCfg -and $vmCfg.admin_password) {
+                $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
+                $cred  = New-Object PSCredential('administrator', $secpw)
+            }
+            $isNamedPvForVm = ($storageName -match '^pv-') -and (($storageName -replace '^pv-','') -ieq $vmName)
+            if ($isNamedPvForVm) {
+                Invoke-VMDockerControl -VmName $vmName -Cred $cred -Action 'stop' -DockerVolumeLabel $storageName
+            }
+
             $drive = Get-VMDiskForPath -VmName $vmName -StoragePath $sp
             if ($drive) { Remove-VMHardDiskDrive -VMHardDiskDrive $drive -ErrorAction Stop }
         } catch {

@@ -56,16 +56,18 @@ function Invoke-VMDockerControl {
     param(
         [string]$VmName,
         [PSCredential]$Cred,
-        [ValidateSet('stop','start')][string]$Action
+        [ValidateSet('stop','start')][string]$Action,
+        [string]$DockerVolumeLabel = 'DockerData',
+        [switch]$EnsureDaemonConfig
     )
     $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
     if (-not $vm -or $vm.State -ne 'Running') { return }
     $icArgs = @{
         VMName      = $VmName
-        ArgumentList = $Action
+        ArgumentList = @($Action, $DockerVolumeLabel, [bool]$EnsureDaemonConfig.IsPresent)
         ErrorAction  = 'SilentlyContinue'
         ScriptBlock  = {
-            param([string]$act)
+            param([string]$act, [string]$volLabel, [bool]$ensureDaemon)
             if ($act -eq 'stop') {
                 Stop-Service docker -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 2   # brief pause for Docker to release P:\docker-data handles
@@ -75,14 +77,43 @@ function Invoke-VMDockerControl {
                     Set-Disk -Number $_.Number -IsOffline $false  -ErrorAction SilentlyContinue
                     Set-Disk -Number $_.Number -IsReadOnly $false -ErrorAction SilentlyContinue
                 }
-                $vol = Get-Volume -FileSystemLabel 'DockerData' -ErrorAction SilentlyContinue
+
+                $targetLabel = if ([string]::IsNullOrWhiteSpace($volLabel)) { 'DockerData' } else { $volLabel }
+                $vol = Get-Volume -FileSystemLabel $targetLabel -ErrorAction SilentlyContinue | Select-Object -First 1
+                if (-not $vol -and $targetLabel -ne 'DockerData') {
+                    $vol = Get-Volume -FileSystemLabel 'DockerData' -ErrorAction SilentlyContinue | Select-Object -First 1
+                }
                 if ($vol -and $vol.DriveLetter -ne 'P') {
                     $part = Get-Disk | Where-Object { -not $_.IsOffline } |
                         Get-Partition | Where-Object { $_.Size -gt 100MB -and $_.Type -notin @('System','Reserved','Recovery') } |
-                        Where-Object { (Get-Volume -Partition $_ -ErrorAction SilentlyContinue).FileSystemLabel -eq 'DockerData' } |
+                        Where-Object { (Get-Volume -Partition $_ -ErrorAction SilentlyContinue).FileSystemLabel -eq $vol.FileSystemLabel } |
                         Select-Object -First 1
                     if ($part) { $part | Set-Partition -NewDriveLetter 'P' -ErrorAction SilentlyContinue }
                 }
+
+                if ($ensureDaemon) {
+                    $daemonPath = 'C:\ProgramData\docker\config\daemon.json'
+                    $daemonConfig = @{}
+                    if (Test-Path $daemonPath) {
+                        try {
+                            $existing = Get-Content $daemonPath -Raw | ConvertFrom-Json -ErrorAction Stop
+                            if ($existing) {
+                                foreach ($prop in $existing.PSObject.Properties) {
+                                    $daemonConfig[$prop.Name] = $prop.Value
+                                }
+                            }
+                        } catch {
+                            $daemonConfig = @{}
+                        }
+                    }
+                    $daemonConfig['data-root'] = 'P:\docker-data'
+                    New-Item -ItemType Directory -Path 'C:\ProgramData\docker\config' -Force | Out-Null
+                    if (Get-PSDrive -Name P -ErrorAction SilentlyContinue) {
+                        New-Item -ItemType Directory -Path 'P:\docker-data' -Force | Out-Null
+                    }
+                    $daemonConfig | ConvertTo-Json -Depth 16 | Out-File $daemonPath -Encoding utf8 -Force
+                }
+
                 Start-Service docker -ErrorAction SilentlyContinue
             }
         }

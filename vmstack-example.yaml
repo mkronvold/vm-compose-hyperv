@@ -38,7 +38,7 @@ vms:
     memory_gb: 8
     cpus: 4
     os_disk_gb: 80
-    persistent_disk_gb: 50
+    persistent_disk_gb: 50   # optional legacy Docker PV; omit to skip persistent-storage.vhdx
     network: external
     mac_address: "00:15:5D:AB:CD:01"   # optional — omit for dynamic MAC
     mount:
@@ -50,7 +50,7 @@ vms:
     memory_gb: 4
     cpus: 2
     os_disk_gb: 60
-    persistent_disk_gb: 30
+    # persistent_disk_gb: 30  # optional legacy Docker PV
     network: natnet
     # mac_address: "00:15:5D:AB:CD:02"   # uncomment to pin MAC
     mount:

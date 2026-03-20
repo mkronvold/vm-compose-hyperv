@@ -108,7 +108,7 @@ OPTIONS
 "@
 
 $CommandHelp = @{
-    "up"       = "up / start [<vm>] [-DryRun]`n  Build and START VMs defined in vmstack.yaml.`n  Omit <vm> to target all; specify a VM name to target one.`n  Creates OS disk, persistent disk, unattend.vhdx, unattend.xml, bootstrap.ps1,`n  attaches networks and shared storage, then starts the VM.`n  If a VM already exists, starts it if stopped."
+    "up"       = "up / start [<vm>] [-DryRun]`n  Build and START VMs defined in vmstack.yaml.`n  Omit <vm> to target all; specify a VM name to target one.`n  Creates OS disk, optional legacy persistent disk (persistent_disk_gb > 0),`n  unattend.vhdx, unattend.xml, bootstrap.ps1, attaches networks and shared storage,`n  then starts the VM. If a VM already exists, starts it if stopped."
     "build"    = "build [<vm>] [-Force] [-DryRun]`n  Provision VMs (create disks, VM definition) WITHOUT starting them.`n  Omit <vm> to target all; specify a VM name to target one.`n  If a VM already exists, prompts to rebuild (destroy + recreate).`n  Use -Force to rebuild without prompting."
     "down"     = "down / stop [-DryRun]`n  Stop all VMs (forced power-off)."
     "restart"  = "restart / reboot [-DryRun]`n  Restart all VMs."
@@ -127,11 +127,11 @@ $CommandHelp = @{
     "docker"       = "docker <vm> <docker args...>`n  Run a docker command inside a VM via PowerShell Direct.`n  Example: ./vm-compose.ps1 docker solr ps`n  Example: ./vm-compose.ps1 docker solr run --rm mcr.microsoft.com/windows/nanoserver:ltsc2022 cmd /c echo hello`n  Note: args that match PowerShell parameter names (e.g. -Force) must be quoted."
     "docker-compose" = "docker-compose <vm> <compose args...>`n  Runs 'docker compose' inside a VM via PowerShell Direct.`n  Example: ./vm-compose.ps1 docker-compose solr version`n  Example: ./vm-compose.ps1 docker-compose solr build P:\app --file P:\app\docker-compose.yml"
     "docker-test"  = "docker-test <vm>`n  Pull and run a nanoserver hello-world container inside a VM.`n  Auto-detects the OS build to select the correct image tag (ltsc2022, ltsc2025).`n  Starts the Docker service if it is stopped."
-    "validate" = "validate`n  Lint vmstack.yaml for missing required fields and broken references."
+    "validate" = "validate`n  Lint vmstack.yaml for missing required fields and broken references.`n  Note: persistent_disk_gb is optional."
     "version"  = "version`n  Print version, PowerShell version, and active config file path."
     "mount"    = "mount <vm> <storageName>`n  Hot-add a shared storage VHDX (from the storage: section) to a running VM."
     "unmount"  = "unmount <vm> <storageName>`n  Remove a shared storage VHDX from a VM."
-    "storage"  = "storage <shared|pv> <subcommand> [name] [extra]`n  Manage shared storage and persistent volumes.`n`n  SHARED STORAGE (defined in vmstack.yaml storage: section):`n  storage shared ls                   List all volumes`n  storage shared create <name>        Create and initialize VHDX`n  storage shared rm <name>            Delete VHDX (must be unmounted)`n  storage shared mv <name> <dst>      Move VHDX (must be unmounted)`n  storage shared localmount <n> [S]   Mount on host at drive letter (default S:)`n  storage shared localunmount <n>     Dismount from host`n  storage shared health [name]        Detailed health check`n`n  PERSISTENT VOLUMES (one per VM, mounted as P: in the VM):`n  storage pv ls [vm]                  List all PVs`n  storage pv create <vm>              Create VHDX`n  storage pv destroy <vm>             Delete VHDX`n  storage pv localmount <vm> [P]      Mount on host at drive letter (default P:)`n  storage pv localunmount <vm>        Dismount from host`n  storage pv health [vm]              Detailed health check`n`n  Backward compat: storage ls / rm / mv / init work as before (defaults to shared)"
+    "storage"  = "storage <shared|pv> <subcommand> [name] [extra]`n  Manage shared storage and persistent volumes.`n`n  SHARED STORAGE (defined in vmstack.yaml storage: section):`n  storage shared ls                   List all volumes`n  storage shared create <name>        Create and initialize VHDX`n  storage shared rm <name>            Delete VHDX (must be unmounted)`n  storage shared mv <name> <dst>      Move VHDX (must be unmounted)`n  storage shared localmount <n> [S]   Mount on host at drive letter (default S:)`n  storage shared localunmount <n>     Dismount from host`n  storage shared health [name]        Detailed health check`n`n  PERSISTENT VOLUMES (legacy per-VM disk, optional via persistent_disk_gb):`n  storage pv ls [vm]                  List all PVs`n  storage pv create <vm>              Create VHDX`n  storage pv destroy <vm>             Delete VHDX`n  storage pv localmount <vm> [P]      Mount on host at drive letter (default P:)`n  storage pv localunmount <vm>        Dismount from host`n  storage pv health [vm]              Detailed health check`n`n  Backward compat: storage ls / rm / mv / init work as before (defaults to shared)"
     "localmount"   = "localmount <storageName> [driveLetter]`n  Mount a shared storage VHDX to a host drive letter (default S:).`n  Allows direct file access like a Docker volume.`n  Local mount and VM use are mutually exclusive."
     "localunmount" = "localunmount <storageName>`n  Dismount a shared storage VHDX from the host drive."
     "cp"       = "cp / copy <source> <destination>`n  Copy files between host and a running VM.`n  Host to VM:  cp C:\local\file.txt  myvm:C:\dest\`n  VM to host:  cp myvm:C:\path\file.txt  .`n  Prefix VM paths with vmname: (colon). VM-to-host prompts for Administrator credentials."
@@ -326,6 +326,69 @@ function Write-StorageHostConflict {
     Write-Host "  Run './vm-compose.ps1 localunmount <storageName>' first." -ForegroundColor Gray
 }
 
+function Test-FileLocked {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+        $fs.Dispose()
+        return $false
+    } catch {
+        return $true
+    }
+}
+
+function Wait-VMCheckpointMerge {
+    param(
+        [string]$VmName,
+        [int]$TimeoutSeconds = 300,
+        [int]$PollSeconds = 2
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $waitingShown = $false
+
+    while ((Get-Date) -lt $deadline) {
+        $snapshots = @(Get-VMSnapshot -VMName $VmName -ErrorAction SilentlyContinue)
+        $vmDiffDisks = @()
+        if (Get-VM -Name $VmName -ErrorAction SilentlyContinue) {
+            $vmDiffDisks = @(Get-VMHardDiskDrive -VMName $VmName -ErrorAction SilentlyContinue | Where-Object { $_.Path -match '\.avhdx$' })
+        }
+
+        $activeStorageDiffs = @()
+        if ($stack.storage) {
+            foreach ($sName in $stack.storage.Keys) {
+                $sCfg = $stack.storage[$sName]
+                $sPath = Resolve-StoragePath $sCfg.path
+                $sDir  = Split-Path $sPath
+                $sBase = [System.IO.Path]::GetFileNameWithoutExtension($sPath)
+                foreach ($f in @(Get-Item "$sDir\${sBase}_*.avhdx" -ErrorAction SilentlyContinue)) {
+                    $candidate = ($f.FullName -replace '/', '\')
+                    $attached = @(Get-VMsWithDisk $candidate)
+                    $locked = Test-FileLocked $candidate
+                    if ($attached.Count -gt 0 -or $locked) {
+                        $activeStorageDiffs += $candidate
+                    }
+                }
+            }
+        }
+
+        if ($snapshots.Count -eq 0 -and $vmDiffDisks.Count -eq 0 -and $activeStorageDiffs.Count -eq 0) {
+            if ($waitingShown) { Write-Host "  Checkpoint merge complete." -ForegroundColor Gray }
+            return $true
+        }
+
+        if (-not $waitingShown) {
+            Write-Host "  Waiting for checkpoint merge to complete..." -ForegroundColor Yellow
+            $waitingShown = $true
+        }
+        Start-Sleep -Seconds $PollSeconds
+    }
+
+    Write-Host "  WARNING: Timed out waiting for checkpoint merge completion; continuing rebuild." -ForegroundColor Yellow
+    return $false
+}
+
 function Resolve-VMSwitch {
     param($name, $cfg)
     $switchName = $cfg.switch_name
@@ -397,10 +460,14 @@ function Build-VM {
             Get-VMSnapshot -VMName $vmName -ErrorAction SilentlyContinue |
                 Remove-VMSnapshot -IncludeAllChildSnapshots -Confirm:$false -ErrorAction SilentlyContinue
         }
+        Invoke-IfLive "Wait for checkpoint merge completion for $vmName" {
+            Wait-VMCheckpointMerge -VmName $vmName -TimeoutSeconds 600 | Out-Null
+        }
         Invoke-IfLive "Remove-VM $vmName" {
             Remove-VM -Name $vmName -Force
         }
-        # Delete any orphaned avhdx differencing disks linked to shared storage
+        # Inspect orphaned avhdx differencing disks linked to shared storage.
+        # Safety-first: do not auto-delete here; report unreferenced files for manual review.
         if ($stack.storage) {
             foreach ($sName in $stack.storage.Keys) {
                 $sCfg = $stack.storage[$sName]
@@ -408,8 +475,14 @@ function Build-VM {
                 $sDir  = Split-Path $sPath
                 $sBase = [System.IO.Path]::GetFileNameWithoutExtension($sPath)
                 Get-Item "$sDir\${sBase}_*.avhdx" -ErrorAction SilentlyContinue | ForEach-Object {
-                    Write-Host "  Removing orphaned differencing disk: $($_.Name)" -ForegroundColor Gray
-                    Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+                    $candidatePath = ($_.FullName -replace '/', '\')
+                    $attachedVms = @(Get-VMsWithDisk $candidatePath)
+                    if ($attachedVms.Count -gt 0) {
+                        Write-Host "  Keeping differencing disk in use: $($_.Name) (attached to: $($attachedVms -join ', '))" -ForegroundColor Yellow
+                    } else {
+                        Write-Host "  Found unreferenced differencing disk: $($_.Name)" -ForegroundColor Yellow
+                        Write-Host "    Left in place for safety. Review before deleting manually." -ForegroundColor Gray
+                    }
                 }
             }
         }
@@ -448,6 +521,25 @@ function Build-VM {
     $VhdPath        = Join-Path $VmPath "$vmName.vhdx"
     $PersistentVhdPath = Join-Path $VmPath "persistent-storage.vhdx"
     $AnswerIsoPath  = Join-Path $VmPath "answer.iso"
+    $persistentDiskRaw = if ($null -ne $cfg.persistent_disk_gb) { "$($cfg.persistent_disk_gb)".Trim() } else { '' }
+    $persistentDiskGB = 0.0
+    $hasPersistentDisk = $false
+    if ($persistentDiskRaw) {
+        if (-not [double]::TryParse($persistentDiskRaw, [ref]$persistentDiskGB)) {
+            Write-Host "ERROR: VM '$vmName' has invalid persistent_disk_gb value '$persistentDiskRaw' (must be numeric)." -ForegroundColor Red
+            return
+        }
+        if ($persistentDiskGB -gt 0) {
+            $hasPersistentDisk = $true
+        } else {
+            Write-Host "WARNING: VM '$vmName' has persistent_disk_gb <= 0; skipping legacy persistent disk." -ForegroundColor Yellow
+        }
+    }
+    $preferredDockerVolumeLabel = 'DockerData'
+    $namedPvForVm = "pv-$vmName"
+    if (-not $hasPersistentDisk -and $cfg.mount -and @($cfg.mount) -contains $namedPvForVm -and $stack.storage -and $stack.storage[$namedPvForVm]) {
+        $preferredDockerVolumeLabel = $namedPvForVm
+    }
 
     Invoke-IfLive "New-Item Directory $VmPath + $SetupDir" {
         New-Item -ItemType Directory -Path $VmPath -Force | Out-Null
@@ -684,7 +776,7 @@ Get-Disk | Where-Object IsOffline | ForEach-Object {
     Set-Disk -Number `$_.Number -IsReadOnly `$false
 }
 
-# Initialize persistent storage disk (idempotent — only acts on RAW disks)
+# Initialize legacy persistent storage disk (idempotent — only acts on RAW disks)
 # Select-Object -First 1 avoids the PS5.1 single-object .Count = $null pitfall
 `$rawDisk = Get-Disk | Where-Object PartitionStyle -eq 'RAW' | Select-Object -First 1
 if (`$rawDisk) {
@@ -694,14 +786,26 @@ if (`$rawDisk) {
         Format-Volume -FileSystem NTFS -NewFileSystemLabel 'DockerData' -Confirm:`$false | Out-Null
 }
 
+# Resolve Docker data volume label preference (named pv-<vm> first when configured, then DockerData)
+`$dockerPreferredLabel = '$preferredDockerVolumeLabel'
+`$dockerCandidateLabels = @(`$dockerPreferredLabel, 'DockerData') | Select-Object -Unique
+`$dockerDataVol = `$null
+foreach (`$lbl in `$dockerCandidateLabels) {
+    `$dockerDataVol = Get-Volume -FileSystemLabel `$lbl -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (`$dockerDataVol) { break }
+}
+
 # Assign drive letters to any partitions that have none (idempotent)
 Get-Disk | Where-Object { `$_.PartitionStyle -ne 'RAW' -and -not `$_.IsOffline } |
     Get-Partition | Where-Object { -not `$_.DriveLetter -and `$_.Size -gt 100MB -and `$_.Type -notin @('System','Reserved','Recovery') } |
     ForEach-Object { `$_ | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue }
 
-# Pin drive letters: DockerData (persistent) → P:, SharedData → S:
+# Pin drive letters: DockerData-compatible volume -> P:, SharedData -> S:
 # Handles both wrong-letter and no-letter cases by finding the partition via volume label
-@([PSCustomObject]@{ Label = 'DockerData'; Letter = 'P' }, [PSCustomObject]@{ Label = 'SharedData'; Letter = 'S' }) |
+`$pinTargets = [System.Collections.ArrayList]@()
+if (`$dockerDataVol) { [void]`$pinTargets.Add([PSCustomObject]@{ Label = `$dockerDataVol.FileSystemLabel; Letter = 'P' }) }
+[void]`$pinTargets.Add([PSCustomObject]@{ Label = 'SharedData'; Letter = 'S' })
+`$pinTargets |
 ForEach-Object {
     `$pinLabel = `$_.Label; `$pinLetter = `$_.Letter
     `$vol = Get-Volume -FileSystemLabel `$pinLabel -ErrorAction SilentlyContinue
@@ -719,7 +823,7 @@ ForEach-Object {
 }
 
 # Write Docker daemon config pointing to P:\docker-data (idempotent)
-if ((Get-Volume -FileSystemLabel 'DockerData' -ErrorAction SilentlyContinue) -and
+if (`$dockerDataVol -and
     -not (Test-Path 'C:\ProgramData\docker\config\daemon.json')) {
     New-Item -ItemType Directory -Path 'P:\docker-data' -Force | Out-Null
     `$daemonConfig = @{ 'data-root' = 'P:\docker-data' }
@@ -806,12 +910,16 @@ Stop-Transcript | Out-Null
     # -------------------------
     # Create persistent disk
     # -------------------------
-    Invoke-IfLive "New-VHD persistent disk $PersistentVhdPath ($($cfg.persistent_disk_gb) GB)" {
-        if (-not (Test-Path $PersistentVhdPath)) {
-            New-VHD -Path $PersistentVhdPath -SizeBytes ($cfg.persistent_disk_gb * 1GB) -Dynamic | Out-Null
-        } else {
-            Write-Host "Persistent disk already exists — preserving data ($PersistentVhdPath)"
+    if ($hasPersistentDisk) {
+        Invoke-IfLive "New-VHD persistent disk $PersistentVhdPath ($persistentDiskGB GB)" {
+            if (-not (Test-Path $PersistentVhdPath)) {
+                New-VHD -Path $PersistentVhdPath -SizeBytes ($persistentDiskGB * 1GB) -Dynamic | Out-Null
+            } else {
+                Write-Host "Persistent disk already exists — preserving data ($PersistentVhdPath)"
+            }
         }
+    } elseif (-not $persistentDiskRaw) {
+        Write-Host "No legacy persistent disk configured (persistent_disk_gb omitted or <= 0)." -ForegroundColor Gray
     }
 
     # -------------------------
@@ -823,7 +931,9 @@ Stop-Transcript | Out-Null
 
         Add-VMDvdDrive -VMName $vmName -Path $cfg.iso | Out-Null
         Add-VMDvdDrive -VMName $vmName -Path $AnswerIsoPath | Out-Null
-        Add-VMHardDiskDrive -VMName $vmName -Path $PersistentVhdPath | Out-Null
+        if ($hasPersistentDisk) {
+            Add-VMHardDiskDrive -VMName $vmName -Path $PersistentVhdPath | Out-Null
+        }
         Enable-VMIntegrationService -VMName $vmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue
     }
 
@@ -1409,10 +1519,19 @@ function Invoke-Validate {
     } else {
         foreach ($vmName in $stack.vms.Keys) {
             $cfg = $stack.vms[$vmName]
-            foreach ($field in @("iso","memory_gb","cpus","os_disk_gb","persistent_disk_gb")) {
+            foreach ($field in @("iso","memory_gb","cpus","os_disk_gb")) {
                 if (-not $cfg[$field]) {
                     $errors += "VM '$vmName': missing required field '$field'"
                 }
+            }
+            if ($null -ne $cfg.persistent_disk_gb -and "$($cfg.persistent_disk_gb)".Trim()) {
+                $pvSize = 0.0
+                $rawPvSize = "$($cfg.persistent_disk_gb)".Trim()
+                if (-not [double]::TryParse($rawPvSize, [ref]$pvSize) -or $pvSize -le 0) {
+                    $errors += "VM '$vmName': persistent_disk_gb must be a number greater than 0 when specified"
+                }
+            } else {
+                $warnings += "VM '$vmName': persistent_disk_gb is not set — legacy per-VM persistent-storage.vhdx will be skipped"
             }
             if ($cfg.network -and -not $stack.networks) {
                 $errors += "VM '$vmName': references network '$($cfg.network)' but no networks: section exists"
@@ -1770,13 +1889,16 @@ function Invoke-PVCommand {
             $targets = if ($VmArg) { @($VmArg) } else { @($stack.vms.Keys) }
             Write-Host ""
             Write-Host "  Persistent Volumes:" -ForegroundColor Cyan
-            Write-Host ("  {0,-14} {1,8}  {2,8}  {3}" -f 'VM', 'Used GB', 'Max GB', 'Status')
+            Write-Host ("  {0,-14} {1,8}  {2,8}  {3}" -f 'VM', 'Used GB', 'Cfg GB', 'Status')
             Write-Host ("  " + ("-" * 50))
             foreach ($vm in $targets) {
                 $pvPath = Get-PVPath $vm
                 $exists = Test-Path $pvPath
                 $usedGB = if ($exists) { [math]::Round((Get-Item $pvPath).Length / 1GB, 2) } else { 0 }
-                $cfgGB  = if ($stack.vms[$vm]) { $stack.vms[$vm].persistent_disk_gb } else { '?' }
+                $cfgGB = '-'
+                if ($stack.vms[$vm] -and $null -ne $stack.vms[$vm].persistent_disk_gb -and "$($stack.vms[$vm].persistent_disk_gb)".Trim()) {
+                    $cfgGB = $stack.vms[$vm].persistent_disk_gb
+                }
                 $vmObj  = Get-VM -Name $vm -ErrorAction SilentlyContinue
                 $attached = $exists -and $vmObj -and (Get-VMHardDiskDrive -VMName $vm -ErrorAction SilentlyContinue | Where-Object Path -eq $pvPath)
                 $hostDisk = if ($exists) { Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -eq $pvPath } | Select-Object -First 1 } else { $null }
@@ -1792,7 +1914,13 @@ function Invoke-PVCommand {
             if (-not $stack.vms[$VmArg]) { Write-Host "VM '$VmArg' not found in $ConfigFile" -ForegroundColor Red; return }
             $pvPath = Get-PVPath $VmArg
             if (Test-Path $pvPath) { Write-Host "Already exists: $pvPath" -ForegroundColor Yellow; return }
-            $gb = $stack.vms[$VmArg].persistent_disk_gb
+            $gbRaw = if ($null -ne $stack.vms[$VmArg].persistent_disk_gb) { "$($stack.vms[$VmArg].persistent_disk_gb)".Trim() } else { '' }
+            $gb = 0.0
+            if (-not $gbRaw -or -not [double]::TryParse($gbRaw, [ref]$gb) -or $gb -le 0) {
+                Write-Host "VM '$VmArg' does not define a valid persistent_disk_gb (> 0)." -ForegroundColor Red
+                Write-Host "  Add it in $ConfigFile, or use named storage volumes under storage: + mount: instead." -ForegroundColor Gray
+                return
+            }
             New-Item -ItemType Directory -Path (Split-Path $pvPath) -Force | Out-Null
             New-VHD -Path $pvPath -SizeBytes ($gb * 1GB) -Dynamic | Out-Null
             Write-Host "Created: $pvPath ($gb GB) — will be formatted on first VM boot (P:\DockerData)" -ForegroundColor Green
@@ -1861,7 +1989,10 @@ function Invoke-PVCommand {
                 Write-Host "  VM: $vm" -ForegroundColor Cyan
                 if (-not $exists) { Write-Host "  [!] VHDX not found: $pvPath" -ForegroundColor Red; continue }
                 $usedGB = [math]::Round((Get-Item $pvPath).Length / 1GB, 2)
-                $cfgGB  = if ($stack.vms[$vm]) { $stack.vms[$vm].persistent_disk_gb } else { '?' }
+                $cfgGB = '-'
+                if ($stack.vms[$vm] -and $null -ne $stack.vms[$vm].persistent_disk_gb -and "$($stack.vms[$vm].persistent_disk_gb)".Trim()) {
+                    $cfgGB = $stack.vms[$vm].persistent_disk_gb
+                }
                 Write-Host "  [+] $pvPath" -ForegroundColor Green
                 try {
                     $vhd = Get-VHD -Path $pvPath -ErrorAction Stop
