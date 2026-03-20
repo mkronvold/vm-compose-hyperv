@@ -41,13 +41,14 @@ desktop.ini
 *.yaml.bak
 
 # Personal notes
-names.md
+local/
+
+# vm passwords for quality of life (don't commit these!)
 *.pw
-winkey.md
 
 # Actual stack config (commit vmstack-example.yaml instead)
 vmstack.yaml
 
 # Generated service wrapper scripts
 *-svc-wrapper.ps1
-solr.md
+
