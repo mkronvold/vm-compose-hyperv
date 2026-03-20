@@ -73,7 +73,7 @@ COMMANDS
   logs <vm>       Show application event log from a VM
   exec <vm> <cmd> Run a command inside a VM
   docker <vm> <docker args...>         Run a docker command inside a VM
-  docker-compose <vm> <docker args...> Alias for docker (same pass-through)
+  docker-compose <vm> <compose args...> Run docker compose inside a VM
   ps <vm>         List processes inside a VM
   ssh <vm>        Open an interactive shell inside a VM
   ip <vm>         Print the VM's IP address
@@ -125,7 +125,7 @@ $CommandHelp = @{
     "top"      = "top <vm>`n  Live CPU/memory loop (Ctrl+C to exit)."
     "health"       = "health [<vm>]`n  Health check: VM state, IP assignment, Docker responsiveness. Omit <vm> for all."
     "docker"       = "docker <vm> <docker args...>`n  Run a docker command inside a VM via PowerShell Direct.`n  Example: ./vm-compose.ps1 docker solr ps`n  Example: ./vm-compose.ps1 docker solr run --rm mcr.microsoft.com/windows/nanoserver:ltsc2022 cmd /c echo hello`n  Note: args that match PowerShell parameter names (e.g. -Force) must be quoted."
-    "docker-compose" = "docker-compose <vm> <docker args...>`n  Alias for the docker command. Passes all arguments to docker inside the VM.`n  Example: ./vm-compose.ps1 docker-compose solr ps`n  Example: ./vm-compose.ps1 docker-compose solr run --rm image cmd /c echo hello"
+    "docker-compose" = "docker-compose <vm> <compose args...>`n  Runs 'docker compose' inside a VM via PowerShell Direct.`n  Example: ./vm-compose.ps1 docker-compose solr version`n  Example: ./vm-compose.ps1 docker-compose solr build P:\app --file P:\app\docker-compose.yml"
     "docker-test"  = "docker-test <vm>`n  Pull and run a nanoserver hello-world container inside a VM.`n  Auto-detects the OS build to select the correct image tag (ltsc2022, ltsc2025).`n  Starts the Docker service if it is stopped."
     "validate" = "validate`n  Lint vmstack.yaml for missing required fields and broken references."
     "version"  = "version`n  Print version, PowerShell version, and active config file path."
@@ -1267,6 +1267,32 @@ function Invoke-DockerInVM {
     }
 }
 
+function Invoke-DockerComposeInVM {
+    param([string]$vmName, [string[]]$composeArgs)
+
+    $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+    if (-not $vm) {
+        Write-Host "VM not found: $vmName" -ForegroundColor Red
+        return
+    }
+    if ($vm.State -ne 'Running') {
+        Write-Host "VM '$vmName' is not running (state: $($vm.State))" -ForegroundColor Red
+        return
+    }
+
+    try {
+        Invoke-Command -VMName $vmName -Credential (Get-VMCredential $vmName) -ScriptBlock {
+            param([string[]]$a)
+            $dockerBin = 'C:\Program Files\Docker'
+            if ($env:Path -notlike "*$dockerBin*") { $env:Path = "$env:Path;$dockerBin" }
+            & docker compose @a
+            exit $LASTEXITCODE
+        } -ArgumentList (,$composeArgs) -ErrorAction Stop
+    } catch {
+        Write-Host "Error running docker compose in '$vmName': $_" -ForegroundColor Red
+    }
+}
+
 function Invoke-DockerTest {
     param([string]$vmName)
 
@@ -2257,7 +2283,7 @@ switch ($Command) {
     "docker-compose" {
         Assert-Admin
         if (-not $VmName) {
-            Write-Host "Usage: ./vm-compose.ps1 docker-compose <vmName> <docker args...>" -ForegroundColor Yellow
+            Write-Host "Usage: ./vm-compose.ps1 docker-compose <vmName> <compose args...>" -ForegroundColor Yellow
         } else {
             $allDockerArgs = @()
             if ($ExecCommand) { $allDockerArgs += $ExecCommand }
@@ -2265,9 +2291,9 @@ switch ($Command) {
             if ($ExtraArg)    { $allDockerArgs += $ExtraArg }
             if ($DockerArgs)  { $allDockerArgs += $DockerArgs }
             if (-not $allDockerArgs) {
-                Write-Host "Usage: ./vm-compose.ps1 docker-compose <vmName> <docker args...>" -ForegroundColor Yellow
+                Write-Host "Usage: ./vm-compose.ps1 docker-compose <vmName> <compose args...>" -ForegroundColor Yellow
             } else {
-                Invoke-DockerInVM $VmName $allDockerArgs
+                Invoke-DockerComposeInVM $VmName $allDockerArgs
             }
         }
     }

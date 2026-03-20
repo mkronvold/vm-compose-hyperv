@@ -203,13 +203,13 @@ Shows:
 ./vm-compose.ps1 docker winhost1 run --rm mcr.microsoft.com/windows/nanoserver:ltsc2022 cmd /c echo hello
 ```
 
-`docker-compose` is an alias for the same pass-through:
+`docker-compose` runs `docker compose` inside the VM:
 ```
 ./vm-compose.ps1 docker-compose winhost1 ps
 ./vm-compose.ps1 docker-compose solr build P:\enshrouded-docker --file P:\enshrouded-docker\docker-compose.yml
 ```
 
-Passes all arguments directly to `docker` inside the VM via PowerShell Direct.
+Passes all arguments directly to `docker compose` inside the VM via PowerShell Direct.
 
 > **Tip:** args that match PowerShell parameter names (e.g. `-Force`) should be quoted: `'-Force'`
 
