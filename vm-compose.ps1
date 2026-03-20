@@ -1879,15 +1879,41 @@ function Invoke-VMCopy {
         $null = $Destination -match '^([^:]+):(.+)$'
         $vmName  = $Matches[1]
         $vmPath  = $Matches[2]
-        $srcPath = Resolve-Path $Source -ErrorAction Stop | Select-Object -ExpandProperty Path
 
         if (-not (Get-VM -Name $vmName -ErrorAction SilentlyContinue)) {
             Write-Host "VM '$vmName' not found." -ForegroundColor Red; return
         }
-        Write-Host "Copying '$srcPath' → ${vmName}:$vmPath"
-        Copy-VMFile -VMName $vmName -SourcePath $srcPath -DestinationPath $vmPath `
-                    -FileSource Host -CreateFullPath -Force
-        Write-Host "Done." -ForegroundColor Green
+        try {
+            $srcPath = Resolve-Path -LiteralPath $Source -ErrorAction Stop | Select-Object -ExpandProperty Path
+            $srcItem = Get-Item -LiteralPath $srcPath -ErrorAction Stop
+            Write-Host "Copying '$srcPath' → ${vmName}:$vmPath"
+
+            if ($srcItem.PSIsContainer) {
+                $srcRoot  = $srcPath.TrimEnd('\')
+                $destRoot = ($vmPath -replace '/', '\').TrimEnd('\')
+                $files = @(Get-ChildItem -LiteralPath $srcPath -Recurse -File -Force -ErrorAction Stop)
+
+                foreach ($file in $files) {
+                    $relative = $file.FullName.Substring($srcRoot.Length).TrimStart('\')
+                    $destFile = "$destRoot\$relative"
+                    Copy-VMFile -VMName $vmName -SourcePath $file.FullName -DestinationPath $destFile `
+                                -FileSource Host -CreateFullPath -Force -ErrorAction Stop
+                }
+
+                if ($files.Count -eq 0) {
+                    Write-Host "Source directory is empty; nothing to copy." -ForegroundColor Yellow
+                } else {
+                    Write-Host "Copied $($files.Count) file(s)." -ForegroundColor Green
+                }
+            } else {
+                Copy-VMFile -VMName $vmName -SourcePath $srcPath -DestinationPath $vmPath `
+                            -FileSource Host -CreateFullPath -Force -ErrorAction Stop
+                Write-Host "Copied 1 file." -ForegroundColor Green
+            }
+            Write-Host "Done." -ForegroundColor Green
+        } catch {
+            Write-Host "ERROR copying host path to VM: $($_.Exception.Message)" -ForegroundColor Red
+        }
     } else {
         # VM → Host  (uses PowerShell Direct — requires VM Integration Services)
         $null = $Source -match '^([^:]+):(.+)$'
