@@ -1338,13 +1338,6 @@ function Test-AllVMs {
                 $dockerBin = 'C:\Program Files\Docker'
                 if ($env:Path -notlike "*$dockerBin*") { $env:Path = "$env:Path;$dockerBin" }
 
-                # Docker — catch CommandNotFoundException so it doesn't bubble to outer catch
-                $dockerVer = $null; $dockerOk = $false
-                try {
-                    $dockerVer = & docker info --format '{{.ServerVersion}}' 2>$null
-                    $dockerOk  = $LASTEXITCODE -eq 0 -and $dockerVer
-                } catch { }
-
                 # Containers feature
                 $feature = (Get-WindowsFeature -Name Containers -ErrorAction SilentlyContinue).InstallState -eq 'Installed'
 
@@ -1398,9 +1391,22 @@ function Test-AllVMs {
                     (Get-Content 'C:\Setup\bootstrap.log' | Select-String 'Bootstrap' | Select-Object -Last 1).Line
                 } else { '(no log)' }
 
+                $bootstrapComplete = $lastLine -match '(?i)bootstrap complete'
+
+                # Docker readiness is only enforced after bootstrap completes.
+                $dockerVer = $null
+                $dockerOk = $false
+                if ($bootstrapComplete) {
+                    try {
+                        $dockerVer = & docker info --format '{{.ServerVersion}}' 2>$null
+                        $dockerOk  = $LASTEXITCODE -eq 0 -and $dockerVer
+                    } catch { }
+                }
+
                 [PSCustomObject]@{
                     DockerOk      = $dockerOk
                     DockerVersion = $dockerVer
+                    BootstrapComplete = $bootstrapComplete
                     FeatureOk     = $feature
                     DockerVolume  = if ($dockerVol) { "$($dockerVol.DriveLetter): ($([math]::Round($dockerVol.SizeRemaining/1GB,1)) GB free)" } else { $null }
                     DaemonJson    = $daemonJson
@@ -1418,7 +1424,11 @@ function Test-AllVMs {
             }
 
             & $fmt $checks.FeatureOk     'Containers feature'  $(if ($checks.FeatureOk) { 'Installed' } else { 'MISSING' })
-            & $fmt $checks.DockerOk      'Docker Engine'       $(if ($checks.DockerVersion) { "v$($checks.DockerVersion)" } else { 'NOT RUNNING' })
+            if ($checks.BootstrapComplete) {
+                & $fmt $checks.DockerOk  'Docker Engine'       $(if ($checks.DockerVersion) { "v$($checks.DockerVersion)" } else { 'NOT RUNNING' })
+            } else {
+                Write-Host ("  [i] {0,-22} {1}" -f 'Docker Engine', 'bootstrap not complete yet') -ForegroundColor Yellow
+            }
             & $fmt ($null -ne $checks.DockerVolume) 'Docker data volume' $(if ($checks.DockerVolume) { $checks.DockerVolume } else { 'NOT FOUND (check disk offline policy)' })
             & $fmt $checks.DaemonJson    'daemon.json'         $(if ($checks.DataRoot) { "data-root=$($checks.DataRoot)" } else { 'missing or unconfigured' })
             if ($checks.SharedVols) {
