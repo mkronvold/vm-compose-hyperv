@@ -15,7 +15,7 @@ Run **Windows containers** on your Windows 11 machine — using the same familia
 ### Key features
 
 - **Declarative YAML config** (`vmstack.yaml`) — define VMs, networks, and storage like Docker Compose
-- **Fully automated provisioning** — OS install via `Autounattend.xml`, Docker Engine from static binaries, no Mirantis license required
+- **Fully automated provisioning** — OS install via `Autounattend.xml`, Docker Engine from static binaries, Docker Compose plugin (`docker compose`), no Mirantis license required
 - **Persistent Docker storage** — each VM gets a dedicated VHDX (`P:\docker-data`) that survives `destroy`
 - **Shared storage** — attach a single VHDX to multiple VMs simultaneously
 - **Named persistent volumes** — per-VM app data VHDXes with a `pv-<name>` convention

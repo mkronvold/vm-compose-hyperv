@@ -761,6 +761,17 @@ if (-not (Get-Service docker -ErrorAction SilentlyContinue)) {
     Start-Service docker
 }
 
+# Install Docker Compose CLI plugin (idempotent)
+`$composePluginPath = 'C:\Program Files\Docker\cli-plugins\docker-compose.exe'
+if (-not (Test-Path `$composePluginPath)) {
+    Write-Host 'Installing Docker Compose plugin...'
+    `$composeRelease = Invoke-RestMethod 'https://api.github.com/repos/docker/compose/releases/latest' -UseBasicParsing
+    `$composeAsset = @(`$composeRelease.assets | Where-Object { `$_.name -eq 'docker-compose-windows-x86_64.exe' }) | Select-Object -First 1
+    if (-not `$composeAsset) { throw 'Could not find docker-compose-windows-x86_64.exe in latest docker/compose release.' }
+    New-Item -ItemType Directory -Path 'C:\Program Files\Docker\cli-plugins' -Force | Out-Null
+    Invoke-WebRequest -UseBasicParsing -Uri `$composeAsset.browser_download_url -OutFile `$composePluginPath
+}
+
 $dismConversionBlock
 Write-Host "Bootstrap complete: `$(Get-Date)"
 Stop-Transcript | Out-Null
@@ -1259,6 +1270,21 @@ function Invoke-DockerInVM {
             param([string[]]$a)
             $dockerBin = 'C:\Program Files\Docker'
             if ($env:Path -notlike "*$dockerBin*") { $env:Path = "$env:Path;$dockerBin" }
+            $composePluginPath = 'C:\Program Files\Docker\cli-plugins\docker-compose.exe'
+            function Ensure-DockerComposePlugin {
+                if (Test-Path $composePluginPath) { return }
+                Write-Host "Docker Compose plugin not found. Installing..."
+                $composeRelease = Invoke-RestMethod 'https://api.github.com/repos/docker/compose/releases/latest' -UseBasicParsing
+                $composeAsset = @($composeRelease.assets | Where-Object { $_.name -eq 'docker-compose-windows-x86_64.exe' }) | Select-Object -First 1
+                if (-not $composeAsset) {
+                    throw "Could not find docker-compose-windows-x86_64.exe in latest docker/compose release."
+                }
+                New-Item -ItemType Directory -Path 'C:\Program Files\Docker\cli-plugins' -Force | Out-Null
+                Invoke-WebRequest -UseBasicParsing -Uri $composeAsset.browser_download_url -OutFile $composePluginPath
+            }
+            if ($a -and $a.Count -gt 0 -and $a[0] -eq 'compose') {
+                Ensure-DockerComposePlugin
+            }
             & docker @a
             exit $LASTEXITCODE
         } -ArgumentList (,$dockerArgs) -ErrorAction Stop
@@ -1285,6 +1311,17 @@ function Invoke-DockerComposeInVM {
             param([string[]]$a)
             $dockerBin = 'C:\Program Files\Docker'
             if ($env:Path -notlike "*$dockerBin*") { $env:Path = "$env:Path;$dockerBin" }
+            $composePluginPath = 'C:\Program Files\Docker\cli-plugins\docker-compose.exe'
+            if (-not (Test-Path $composePluginPath)) {
+                Write-Host "Docker Compose plugin not found. Installing..."
+                $composeRelease = Invoke-RestMethod 'https://api.github.com/repos/docker/compose/releases/latest' -UseBasicParsing
+                $composeAsset = @($composeRelease.assets | Where-Object { $_.name -eq 'docker-compose-windows-x86_64.exe' }) | Select-Object -First 1
+                if (-not $composeAsset) {
+                    throw "Could not find docker-compose-windows-x86_64.exe in latest docker/compose release."
+                }
+                New-Item -ItemType Directory -Path 'C:\Program Files\Docker\cli-plugins' -Force | Out-Null
+                Invoke-WebRequest -UseBasicParsing -Uri $composeAsset.browser_download_url -OutFile $composePluginPath
+            }
             & docker compose @a
             exit $LASTEXITCODE
         } -ArgumentList (,$composeArgs) -ErrorAction Stop
