@@ -1,44 +1,49 @@
 # Repository Layout
 
-A recommended structure for your Hyper‑V Compose project:
-
 ```
-hyperv-compose/
-├── vm-compose.ps1
-├── vmstack.yaml
+win-docker-host/
+├── vm-compose.ps1              # CLI orchestrator (docker-compose equivalent)
+├── vm-dashboard.ps1            # Pode web dashboard (port 8080)
+├── vm-lib.ps1                  # Shared library (VHD chain helpers, used by both)
+├── vm-metrics.ps1              # Prometheus metrics exporter (port 9090)
+├── vm-dashboard-install.ps1    # Install dashboard as a Windows service
+├── vm-dashboard-uninstall.ps1  # Uninstall dashboard service
+├── vm-metrics-install.ps1      # Install metrics exporter as a Windows service
+├── vm-metrics-uninstall.ps1    # Uninstall metrics service
+├── vmstack-example.yaml        # Example VM stack config (commit this)
+├── vmstack.yaml                # Your active config (gitignored)
+├── storage/                    # VHDX files live here (gitignored)
 ├── README.md
-├── .gitignore
-├── networks/
-│   ├── internal-switch.ps1
-│   ├── external-switch.ps1
-│   └── nat-network.ps1
-└── storage/
-    ├── shared-disks.yaml
-    ├── create-shared-disk.ps1
-    └── attach-shared-disk.ps1
+├── REPO.md
+├── TODO.md
+└── .gitignore
 ```
 
-### What each folder does
+### What each file does
 
-- **vm-compose.ps1**  
-  The orchestrator — your “docker‑compose” equivalent.
+- **vm-compose.ps1**
+  The CLI orchestrator — your "docker-compose" equivalent. Handles `up`, `down`, `exec`, `docker`, `storage`, `health`, and more.
 
-- **vmstack.yaml**  
-  Declarative VM definitions.
+- **vm-dashboard.ps1**
+  Pode v2 web dashboard. Shows VM status, storage table, and provides start/stop/restart and storage mount/detach actions.
 
-- **networks/**  
-  Optional Hyper‑V virtual switch definitions.
+- **vm-lib.ps1**
+  Shared helper functions dot-sourced by `vm-compose.ps1` and loaded into all Pode route runspaces via `Use-PodeScript`. Handles VHD checkpoint chain detection (`.avhdx` parent walking) so storage lookups work correctly when VMs have checkpoints.
 
-- **storage/**  
-  Optional shared disks, named volumes, and multi‑VM storage definitions.
+- **vm-metrics.ps1**
+  Prometheus-compatible metrics exporter on `:9090/metrics`. Exposes per-VM state, CPU, memory, uptime, IP assignment, and Docker status.
+
+- **vmstack-example.yaml**
+  A committed example config. Copy to `vmstack.yaml` and edit for your environment.
+
+- **vmstack.yaml**
+  Your live config — gitignored so credentials and local paths don't leak.
 
 ---
 
 # .gitignore
 
-A `.gitignore` tuned for Hyper‑V, PowerShell, and your generated artifacts:
-
-```
+```gitignore
 # Hyper-V VM artifacts
 *.vhd
 *.vhdx
@@ -79,16 +84,24 @@ desktop.ini
 
 # YAML backups
 *.yaml.bak
-*.yaml.bak
+
+# Personal notes
+names.md
+*.pw
+winkey.md
+
+# Actual stack config (commit vmstack-example.yaml instead)
+vmstack.yaml
+
+# Generated service wrapper scripts
+*-svc-wrapper.ps1
 ```
 
 ---
 
-# Networks Section (Compose‑Style)
+# Networks Section (Compose-Style)
 
-You can now define Hyper‑V virtual switches in your YAML, similar to Docker Compose networks.
-
-Add this to your `vmstack.yaml`:
+Define Hyper-V virtual switches in `vmstack.yaml`, similar to Docker Compose networks:
 
 ```yaml
 version: "1"
@@ -113,69 +126,54 @@ vms:
     cpus: 4
     os_disk_gb: 80
     persistent_disk_gb: 50
-    network: internal
+    network: natnet
 ```
 
 ### Supported network types
 
-| Type      | Description |
-|-----------|-------------|
-| `internal` | VM‑only network, no host access |
-| `external` | Bridge to host NIC (internet access) |
+| Type       | Description                              |
+|------------|------------------------------------------|
+| `internal` | VM-only network, no host access          |
+| `external` | Bridge to host NIC (internet access)     |
 | `nat`      | NAT network with custom subnet + gateway |
 
-Your `vm-compose.ps1` can automatically create switches if they don’t exist.
+Switches are **auto-created** if they don't exist.
 
 ---
 
-# Storage Section (Compose‑Style)
+# Storage Section (Compose-Style)
 
-You can define **shared disks** or **named volumes** that multiple VMs can attach to.
+Two storage types are supported:
 
-Add this to your `vmstack.yaml`:
+## Shared Storage
+
+Defined in `vmstack.yaml`, can be attached to multiple VMs simultaneously:
 
 ```yaml
 storage:
   shareddata:
     path: "storage/shareddata.vhdx"
     size_gb: 100
-  logs:
-    path: "storage/logs.vhdx"
-    size_gb: 20
 
 vms:
   winhost1:
-    iso: "D:/ISO/WindowsServer2022.iso"
-    memory_gb: 8
-    cpus: 4
-    os_disk_gb: 80
-    persistent_disk_gb: 50
-    network: internal
     attach:
       - shareddata
-      - logs
-
   winhost2:
-    iso: "D:/ISO/WindowsServer2025.iso"
-    memory_gb: 4
-    cpus: 2
-    os_disk_gb: 60
-    persistent_disk_gb: 30
-    network: internal
     attach:
       - shareddata
 ```
 
-### How storage works
+- VHDXes are **auto-created** during `up`
+- Hot-add/remove at runtime: `mount` / `unmount`
+- Mount on host for direct file access: `storage shared localmount`
 
-- Each named storage entry creates a VHDX under `storage/`
-- Any VM can attach it (read/write)
-- Perfect for:
-  - shared logs  
-  - shared datasets  
-  - cluster state  
-  - Windows container registries  
-  - SQL Server data disks  
+## Persistent Volumes (PVs)
 
-This mirrors Docker Compose’s `volumes:` section.
+Each VM automatically gets a dedicated persistent VHDX (mounted as `P:` inside the VM), sized via `persistent_disk_gb`. Docker's data root is configured to `P:\docker-data` so images, containers, and volumes survive VM rebuilds.
 
+```
+./vm-compose.ps1 storage pv ls
+./vm-compose.ps1 storage pv localmount <vm>
+./vm-compose.ps1 storage pv localunmount <vm>
+```
