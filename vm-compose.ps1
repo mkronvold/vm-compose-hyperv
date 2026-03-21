@@ -1692,7 +1692,7 @@ function Invoke-DockerComposeInVM {
     }
 
     try {
-        Invoke-Command -VMName $vmName -Credential (Get-VMCredential $vmName) -ScriptBlock {
+        $ec = Invoke-Command -VMName $vmName -Credential (Get-VMCredential $vmName) -ScriptBlock {
             param([string[]]$a)
             $dockerBin = 'C:\Program Files\Docker'
             if ($env:Path -notlike "*$dockerBin*") { $env:Path = "$env:Path;$dockerBin" }
@@ -1730,8 +1730,11 @@ function Invoke-DockerComposeInVM {
             if ($subcmd) { $ordered += $subcmd }
             $ordered += $rest
             & docker compose @ordered
-            exit $LASTEXITCODE
-        } -ArgumentList (,$composeArgs) -ErrorAction Stop
+            return $LASTEXITCODE
+        } -ArgumentList (,$composeArgs)
+        if ($ec -and $ec -ne 0) {
+            Write-Host "docker compose exited with code $ec" -ForegroundColor Red
+        }
     } catch {
         Write-Host "Error running docker compose in '$vmName': $_" -ForegroundColor Red
     }
