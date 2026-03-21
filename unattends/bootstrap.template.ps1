@@ -282,22 +282,52 @@ $null = Invoke-BootstrapStep -Step 'Ensure winget availability (App Installer fa
     }
 }
 
-$null = Invoke-BootstrapStep -Step 'Install Git and GitHub tooling via winget' -WarnOnError -Action {
+$null = Invoke-BootstrapStep -Step 'Install Git and GitHub tooling' -WarnOnError -Action {
     $wingetExe = if ($script:wingetCmd) { $script:wingetCmd.Source } else { $null }
     if (-not $wingetExe) {
         $candidateWingetExe = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
         if (Test-Path $candidateWingetExe) { $wingetExe = $candidateWingetExe }
     }
-    if (-not $wingetExe) {
-        throw 'winget executable path not found.'
-    }
-    foreach ($pkgId in @('Git.Git','GitHub.cli','GitHub.GitLFS','GitHub.Copilot')) {
-        Write-Host "Installing $pkgId via winget..."
-        & $wingetExe install --id $pkgId -e --source winget --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "winget install failed for $pkgId (exit $LASTEXITCODE)."
+
+    if ($wingetExe) {
+        Write-Host 'Using winget to install Git and GitHub CLI...'
+        foreach ($pkgId in @('Git.Git','GitHub.cli','GitHub.GitLFS')) {
+            Write-Host "Installing $pkgId via winget..."
+            & $wingetExe install --id $pkgId -e --source winget --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "winget install failed for $pkgId (exit $LASTEXITCODE)." }
         }
+    } else {
+        Write-Host 'winget not available (common on Windows Server) — using direct downloads...'
+
+        # Git for Windows
+        $gitRelease = Invoke-RestMethod 'https://api.github.com/repos/git-for-windows/git/releases/latest' -UseBasicParsing
+        $gitAsset = @($gitRelease.assets | Where-Object { $_.name -match '^Git-[\d.]+-64-bit\.exe$' }) | Select-Object -First 1
+        if (-not $gitAsset) { throw 'Could not find Git x64 installer in release assets.' }
+        Write-Host "Downloading Git $($gitRelease.tag_name)..."
+        $gitInstaller = 'C:\Setup\git-installer.exe'
+        Invoke-WebRequest -UseBasicParsing -Uri $gitAsset.browser_download_url -OutFile $gitInstaller
+        $r = Start-Process -FilePath $gitInstaller -ArgumentList '/VERYSILENT /NORESTART /SP- /COMPONENTS="assoc,assoc_sh"' -Wait -PassThru
+        if ($r.ExitCode -ne 0) { throw "Git installer exited with code $($r.ExitCode)." }
+        $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + $env:PATH
+
+        # GitHub CLI
+        $ghRelease = Invoke-RestMethod 'https://api.github.com/repos/cli/cli/releases/latest' -UseBasicParsing
+        $ghAsset = @($ghRelease.assets | Where-Object { $_.name -match '^gh_[\d.]+_windows_amd64\.msi$' }) | Select-Object -First 1
+        if (-not $ghAsset) { throw 'Could not find gh CLI MSI in release assets.' }
+        Write-Host "Downloading gh $($ghRelease.tag_name)..."
+        $ghMsi = 'C:\Setup\gh-cli.msi'
+        Invoke-WebRequest -UseBasicParsing -Uri $ghAsset.browser_download_url -OutFile $ghMsi
+        $r = Start-Process msiexec -ArgumentList "/i `"$ghMsi`" /qn /norestart" -Wait -PassThru
+        if ($r.ExitCode -ne 0) { throw "gh CLI MSI installer exited with code $($r.ExitCode)." }
+        $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + $env:PATH
     }
+}
+
+$null = Invoke-BootstrapStep -Step 'Install gh copilot extension' -WarnOnError -Action {
+    $ghExe = Get-Command gh -ErrorAction SilentlyContinue
+    if (-not $ghExe) { throw 'gh CLI not found; cannot install copilot extension.' }
+    & gh extension install github/gh-copilot --force 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "gh extension install failed (exit $LASTEXITCODE)." }
 }
 
 __DISM_CONVERSION_BLOCK__
