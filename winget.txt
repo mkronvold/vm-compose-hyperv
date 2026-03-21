@@ -1,5 +1,0 @@
-
-winget install --id Git.Git -e --source winget
-winget install --id GitHub.cli -e --source winget
-winget install --id GitHub.GitLFS -e --source winget
-winget install --id GitHub.Copilot -e --source winget	

@@ -761,7 +761,8 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
     # -------------------------
     # Generate bootstrap.ps1 from template
     # -------------------------
-    $bootstrapTemplatePath = Join-Path $PSScriptRoot 'unattends\bootstrap.template.ps1'
+    $bootstrapTemplateRel = if ($cfg.bootstrap_template) { $cfg.bootstrap_template } else { 'bootstraps/bootstrap-win2022-eval.ps1' }
+    $bootstrapTemplatePath = Join-Path $PSScriptRoot $bootstrapTemplateRel.Replace('/', '\')
     if (-not (Test-Path $bootstrapTemplatePath)) {
         Write-Host "ERROR: Bootstrap template not found: $bootstrapTemplatePath" -ForegroundColor Red
         return
