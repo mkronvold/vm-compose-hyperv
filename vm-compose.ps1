@@ -33,7 +33,7 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","docker","docker-compose","docker-test","validate","version","mount","unmount","storage","localmount","localunmount","cp","copy","metrics","web","dashboard","getlog","bootlogs","note","help")]
+    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","docker","docker-compose","docker-test","validate","version","mount","unmount","storage","localmount","localunmount","cp","copy","metrics","web","dashboard","getlog","bootlogs","bootlog","note","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -2653,7 +2653,7 @@ switch ($Command) {
         }
     }
 
-    "bootlogs" {
+    { $_ -in 'bootlogs','bootlog' } {
         Assert-Admin
         if (-not $VmName) {
             Write-Host "Usage: ./vm-compose.ps1 bootlogs <vmName> [tailLines]" -ForegroundColor Yellow
