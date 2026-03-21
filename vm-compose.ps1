@@ -1707,7 +1707,28 @@ function Invoke-DockerComposeInVM {
                 New-Item -ItemType Directory -Path 'C:\Program Files\Docker\cli-plugins' -Force | Out-Null
                 Invoke-WebRequest -UseBasicParsing -Uri $composeAsset.browser_download_url -OutFile $composePluginPath
             }
-            & docker compose @a
+            # Reorder args: global flags must come before the subcommand in docker compose v2
+            $globalFlagsWithValue = @('--file','-f','--project-directory','--project-name','-p','--env-file','--profile','--progress')
+            $globalFlagsNoValue   = @('--ansi','--no-ansi','--compatibility','--dry-run','--verbose')
+            $gFlags = @(); $subcmd = $null; $rest = @(); $i = 0
+            while ($i -lt $a.Count) {
+                $arg = $a[$i]
+                if ($null -eq $subcmd -and $globalFlagsWithValue -contains $arg) {
+                    $gFlags += $arg; $i++
+                    if ($i -lt $a.Count) { $gFlags += $a[$i]; $i++ }
+                } elseif ($null -eq $subcmd -and $globalFlagsNoValue -contains $arg) {
+                    $gFlags += $arg; $i++
+                } elseif ($null -eq $subcmd -and $arg -notlike '-*') {
+                    $subcmd = $arg; $i++
+                } else {
+                    $rest += $arg; $i++
+                }
+            }
+            $ordered = @()
+            if ($gFlags) { $ordered += $gFlags }
+            if ($subcmd) { $ordered += $subcmd }
+            $ordered += $rest
+            & docker compose @ordered
             exit $LASTEXITCODE
         } -ArgumentList (,$composeArgs) -ErrorAction Stop
     } catch {
