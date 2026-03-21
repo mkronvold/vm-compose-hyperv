@@ -1692,7 +1692,7 @@ function Invoke-DockerComposeInVM {
     }
 
     try {
-        $ec = Invoke-Command -VMName $vmName -Credential (Get-VMCredential $vmName) -ScriptBlock {
+        Invoke-Command -VMName $vmName -Credential (Get-VMCredential $vmName) -ScriptBlock {
             param([string[]]$a)
             $dockerBin = 'C:\Program Files\Docker'
             if ($env:Path -notlike "*$dockerBin*") { $env:Path = "$env:Path;$dockerBin" }
@@ -1729,12 +1729,10 @@ function Invoke-DockerComposeInVM {
             if ($gFlags) { $ordered += $gFlags }
             if ($subcmd) { $ordered += $subcmd }
             $ordered += $rest
-            & docker compose @ordered
-            return $LASTEXITCODE
+            # Merge stderr into stdout so docker progress lines don't appear as red error records
+            & docker compose @ordered 2>&1 | ForEach-Object { "$_" }
+            if ($LASTEXITCODE -ne 0) { Write-Warning "docker compose exited with code $LASTEXITCODE" }
         } -ArgumentList (,$composeArgs)
-        if ($ec -and $ec -ne 0) {
-            Write-Host "docker compose exited with code $ec" -ForegroundColor Red
-        }
     } catch {
         Write-Host "Error running docker compose in '$vmName': $_" -ForegroundColor Red
     }
