@@ -1502,15 +1502,10 @@ function Test-AllVMs {
                     } catch { }
                 }
 
-                $wingetVer = $null; $wingetOk = $false
                 $gitVer = $null; $gitOk = $false
                 $ghVer = $null; $ghOk = $false
                 $copilotVer = $null; $copilotOk = $false
                 if ($bootstrapComplete) {
-                    try {
-                        $raw = & winget --version 2>$null
-                        if ($LASTEXITCODE -eq 0 -and $raw) { $wingetVer = $raw.ToString().Trim(); $wingetOk = $true }
-                    } catch { }
                     try {
                         $raw = & git --version 2>$null
                         if ($LASTEXITCODE -eq 0 -and $raw) {
@@ -1539,8 +1534,6 @@ function Test-AllVMs {
                     DockerVersion = $dockerVer
                     ComposeOk     = $composeOk
                     ComposeVersion = $composeVer
-                    WingetOk      = $wingetOk
-                    WingetVersion = $wingetVer
                     GitOk         = $gitOk
                     GitVersion    = $gitVer
                     GhOk          = $ghOk
@@ -1575,7 +1568,6 @@ function Test-AllVMs {
             if ($checks.BootstrapComplete) {
                 & $fmt $checks.DockerOk  'Docker Engine'       $(if ($checks.DockerVersion) { "v$($checks.DockerVersion)" } else { 'NOT RUNNING' })
                 & $fmt $checks.ComposeOk 'Docker Compose'      $(if ($checks.ComposeVersion) { "v$($checks.ComposeVersion)" } else { 'NOT FOUND' })
-                & $fmt $checks.WingetOk  'winget'              $(if ($checks.WingetVersion) { $checks.WingetVersion } else { 'NOT FOUND' })
                 & $fmt $checks.GitOk     'git'                 $(if ($checks.GitVersion) { "v$($checks.GitVersion)" } else { 'NOT FOUND' })
                 & $fmt $checks.GhOk      'gh (GitHub CLI)'     $(if ($checks.GhVersion) { "v$($checks.GhVersion)" } else { 'NOT FOUND' })
                 & $fmt $checks.CopilotOk 'gh copilot'          $(if ($checks.CopilotVersion) { "v$($checks.CopilotVersion)" } else { 'NOT FOUND' })
