@@ -1501,11 +1501,51 @@ function Test-AllVMs {
                     } catch { }
                 }
 
+                $wingetVer = $null; $wingetOk = $false
+                $gitVer = $null; $gitOk = $false
+                $ghVer = $null; $ghOk = $false
+                $copilotVer = $null; $copilotOk = $false
+                if ($bootstrapComplete) {
+                    try {
+                        $raw = & winget --version 2>$null
+                        if ($LASTEXITCODE -eq 0 -and $raw) { $wingetVer = $raw.ToString().Trim(); $wingetOk = $true }
+                    } catch { }
+                    try {
+                        $raw = & git --version 2>$null
+                        if ($LASTEXITCODE -eq 0 -and $raw) {
+                            $gitVer = $raw.ToString().Trim() -replace '^git version\s*', ''
+                            $gitOk = $true
+                        }
+                    } catch { }
+                    try {
+                        $raw = (& gh --version 2>$null | Select-Object -First 1)
+                        if ($LASTEXITCODE -eq 0 -and $raw) {
+                            $ghVer = $raw.ToString().Trim() -replace '^gh version\s+(\S+).*$', '$1'
+                            $ghOk = $true
+                        }
+                    } catch { }
+                    try {
+                        $raw = (& gh copilot --version 2>$null | Select-Object -First 1)
+                        if ($LASTEXITCODE -eq 0 -and $raw) {
+                            $copilotVer = $raw.ToString().Trim() -replace '^.*?(\d[\d.]+\S*).*$', '$1'
+                            $copilotOk = $true
+                        }
+                    } catch { }
+                }
+
                 [PSCustomObject]@{
                     DockerOk      = $dockerOk
                     DockerVersion = $dockerVer
                     ComposeOk     = $composeOk
                     ComposeVersion = $composeVer
+                    WingetOk      = $wingetOk
+                    WingetVersion = $wingetVer
+                    GitOk         = $gitOk
+                    GitVersion    = $gitVer
+                    GhOk          = $ghOk
+                    GhVersion     = $ghVer
+                    CopilotOk     = $copilotOk
+                    CopilotVersion = $copilotVer
                     BootstrapComplete = $bootstrapComplete
                     BootstrapState = $bootstrapState
                     BootstrapWarnings = $bootstrapWarnings
@@ -1534,6 +1574,10 @@ function Test-AllVMs {
             if ($checks.BootstrapComplete) {
                 & $fmt $checks.DockerOk  'Docker Engine'       $(if ($checks.DockerVersion) { "v$($checks.DockerVersion)" } else { 'NOT RUNNING' })
                 & $fmt $checks.ComposeOk 'Docker Compose'      $(if ($checks.ComposeVersion) { "v$($checks.ComposeVersion)" } else { 'NOT FOUND' })
+                & $fmt $checks.WingetOk  'winget'              $(if ($checks.WingetVersion) { $checks.WingetVersion } else { 'NOT FOUND' })
+                & $fmt $checks.GitOk     'git'                 $(if ($checks.GitVersion) { "v$($checks.GitVersion)" } else { 'NOT FOUND' })
+                & $fmt $checks.GhOk      'gh (GitHub CLI)'     $(if ($checks.GhVersion) { "v$($checks.GhVersion)" } else { 'NOT FOUND' })
+                & $fmt $checks.CopilotOk 'gh copilot'          $(if ($checks.CopilotVersion) { "v$($checks.CopilotVersion)" } else { 'NOT FOUND' })
             } else {
                 Write-Host ("  [i] {0,-22} {1}" -f 'Docker Engine', 'bootstrap not complete yet') -ForegroundColor Yellow
                 Write-Host ("  [i] {0,-22} {1}" -f 'Docker Compose', 'bootstrap not complete yet') -ForegroundColor Yellow
