@@ -1246,27 +1246,39 @@ setInterval(pollContainers, 5000);
                 $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
                 $cred  = New-Object PSCredential('administrator', $secpw)
             }
-            $icArgs = @{ VMName = $vmName; ArgumentList = $ctrName; ErrorAction = 'Stop'; ScriptBlock = {
+            $icArgs = @{ VMName = $vmName; ArgumentList = $ctrName; ScriptBlock = {
                 param($cn)
                 $dockerBin = 'C:\Program Files\Docker'
                 if ($env:Path -notlike "*$dockerBin*") { $env:Path = "$env:Path;$dockerBin" }
                 $insp = & docker inspect $cn 2>$null | ConvertFrom-Json
                 if (-not $insp) { return $null }
                 $i = $insp[0]
+                $ips = @()
+                try {
+                    if ($i.NetworkSettings -and $i.NetworkSettings.Networks) {
+                        $ips = @($i.NetworkSettings.Networks.PSObject.Properties |
+                            ForEach-Object { $_.Value } | Where-Object { $_ } |
+                            ForEach-Object { $_.IPAddress } | Where-Object { $_ })
+                    }
+                } catch { }
+                $ports = '{}'
+                try {
+                    if ($i.NetworkSettings -and $i.NetworkSettings.Ports) {
+                        $ports = "$($i.NetworkSettings.Ports | ConvertTo-Json -Depth 2 -Compress)"
+                    }
+                } catch { }
                 [PSCustomObject]@{
                     Name    = if ($i.Name) { $i.Name.TrimStart('/') } else { $cn }
-                    Image   = $i.Config.Image
-                    State   = $i.State.Status
-                    Created = $i.Created
+                    Image   = "$($i.Config.Image)"
+                    State   = "$($i.State.Status)"
+                    Created = "$($i.Created)"
                     Cmd     = if ($i.Config.Cmd) { ($i.Config.Cmd -join ' ') } else { '' }
                     Env     = @(if ($i.Config.Env) { $i.Config.Env } else { @() })
-                    Mounts  = @(if ($i.Mounts) { $i.Mounts | ForEach-Object { "$($_.Source) -> $($_.Destination) ($($_.Mode))" } } else { @() })
-                    IPs     = @(if ($i.NetworkSettings -and $i.NetworkSettings.Networks) {
-                                    $i.NetworkSettings.Networks.PSObject.Properties.Value | ForEach-Object { $_.IPAddress }
-                                } else { @() })
-                    Ports   = if ($i.NetworkSettings -and $i.NetworkSettings.Ports) {
-                                  ($i.NetworkSettings.Ports | ConvertTo-Json -Depth 2 -Compress)
-                              } else { '{}' }
+                    Mounts  = @(if ($i.Mounts) { $i.Mounts | ForEach-Object {
+                                    "$($_.Source) -> $($_.Destination)$(if ($_.Mode) { " ($($_.Mode))" })"
+                                } } else { @() })
+                    IPs     = $ips
+                    Ports   = $ports
                 }
             } }
             if ($cred) { $icArgs.Credential = $cred }
