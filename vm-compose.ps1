@@ -1596,42 +1596,45 @@ function Test-AllVMs {
                 $evalMsg = "$($checks.EvalDays) days remaining"
                 Write-Host ("  [i] {0,-22} {1}" -f 'Eval license', $evalMsg) -ForegroundColor $evalColor
             }
-            $bootstrapMsg = switch ($checks.BootstrapState) {
-                'complete' { "bootstrap complete with $($checks.BootstrapWarnings) warnings, $($checks.BootstrapFailures) failures." }
-                'running' { "bootstrap running with $($checks.BootstrapWarnings) warnings $($checks.BootstrapFailures) failures." }
-                'rebooting' { "bootstrap running with $($checks.BootstrapWarnings) warnings $($checks.BootstrapFailures) failures." }
-                'failed' { "bootstrap failed with $($checks.BootstrapWarnings) warnings, $($checks.BootstrapFailures) failures." }
-                default {
-                    if ($checks.BootstrapLast -like '*complete*') {
-                        "bootstrap complete with $($checks.BootstrapWarnings) warnings, $($checks.BootstrapFailures) failures."
-                    } elseif ($checks.BootstrapLast -eq '(no log)') {
-                        "bootstrap log not found."
-                    } else {
-                        "bootstrap status unknown (warnings=$($checks.BootstrapWarnings), failures=$($checks.BootstrapFailures))."
-                    }
+            $bState  = $checks.BootstrapState
+            $bWarn   = $checks.BootstrapWarnings
+            $bFail   = $checks.BootstrapFailures
+            $bStep   = $checks.BootstrapStep
+            $bStalled = $checks.BootstrapStalled
+
+            $bMark  = '[i]'
+            $bColor = 'Yellow'
+            $bVal   = 'unknown'
+
+            if ($bStalled) {
+                $bMark  = '[!]'; $bColor = 'Red'
+                $bVal   = "stalled · $bStep"
+            } elseif ($bState -eq 'complete') {
+                if ($bFail -gt 0)       { $bMark = '[!]'; $bColor = 'Red';    $bVal = "complete · $bFail failure(s), $bWarn warning(s)" }
+                elseif ($bWarn -gt 0)   { $bMark = '[i]'; $bColor = 'Yellow'; $bVal = "complete · $bWarn warning(s)" }
+                else                    { $bMark = '[+]'; $bColor = 'Green';  $bVal = 'complete' }
+            } elseif ($bState -eq 'failed') {
+                $bMark = '[!]'; $bColor = 'Red'
+                $bVal  = "failed · $bFail failure(s), $bWarn warning(s)"
+            } elseif ($bState -eq 'rebooting') {
+                $bVal = 'rebooting to continue'
+            } elseif ($bState -eq 'running') {
+                $bVal = if ($bStep) { "running · $bStep" } else { 'running' }
+            } elseif ($checks.BootstrapLast -like '*complete*') {
+                $bMark = '[+]'; $bColor = 'Green'; $bVal = 'complete'
+            } elseif ($checks.BootstrapLast -eq '(no log)') {
+                $bVal = 'not started'
+            }
+
+            Write-Host ("  {0} {1,-22} {2}" -f $bMark, 'Bootstrap', $bVal) -ForegroundColor $bColor
+
+            if ($bState -in 'running','rebooting' -or $bStalled) {
+                if ($null -ne $checks.BootstrapAgeMinutes) {
+                    Write-Host ("      last update {0} min ago" -f $checks.BootstrapAgeMinutes) -ForegroundColor DarkGray
                 }
             }
-            if ($checks.BootstrapStalled) {
-                $stallStep = if ($checks.BootstrapStep) { $checks.BootstrapStep } else { '(unknown step)' }
-                $bootstrapMsg = "bootstrap appears stalled at '$stallStep' with $($checks.BootstrapWarnings) warnings $($checks.BootstrapFailures) failures."
-            }
-            $bootstrapColor = switch ($checks.BootstrapState) {
-                'complete' { if ($checks.BootstrapFailures -gt 0) { 'Yellow' } else { 'Green' } }
-                'running' { 'Yellow' }
-                'rebooting' { 'Yellow' }
-                'failed' { 'Red' }
-                default { if ($checks.BootstrapLast -like '*complete*') { 'Green' } else { 'Yellow' } }
-            }
-            if ($checks.BootstrapStalled) { $bootstrapColor = 'Red' }
-            Write-Host ("  [i] {0,-22} {1}" -f 'Bootstrap', $bootstrapMsg) -ForegroundColor $bootstrapColor
-            if ($null -ne $checks.BootstrapAgeMinutes) {
-                Write-Host ("      Last update: {0} min ago" -f $checks.BootstrapAgeMinutes) -ForegroundColor DarkGray
-            }
-            Write-Host ("      {0}" -f $checks.BootstrapLast) -ForegroundColor DarkGray
-            if ($checks.BootstrapState -eq 'failed') {
-                Write-Host "      Action: fix the failing step, then rerun C:\Setup\bootstrap.ps1 inside the VM." -ForegroundColor Yellow
-            } elseif ($checks.BootstrapStalled) {
-                Write-Host "      Action: sign into VM and run C:\Setup\bootstrap.ps1 manually." -ForegroundColor Yellow
+            if ($bState -eq 'failed' -or $bStalled) {
+                Write-Host "      run C:\Setup\bootstrap.ps1 inside the VM to retry." -ForegroundColor Yellow
             }
 
         } catch {
