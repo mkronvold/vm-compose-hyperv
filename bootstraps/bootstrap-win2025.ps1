@@ -1,9 +1,6 @@
 # Bootstrap script for Windows Server 2025 (Eval and Licensed editions)
-# Differences from win2022-eval:
+# Differences from win2022:
 #   - Widgets (TaskbarDa) removed from Server SKU — registry key skipped
-#   - App Installer fallback uses Add-AppxProvisionedPackage (DISM path) first,
-#     which is more reliable on Win2025 Server than Add-AppxPackage
-#   - winget may already be present on Win2025 evaluation media
 
 $logPath = 'C:\Setup\bootstrap.log'
 $script:bootstrapRunId = [guid]::NewGuid().ToString('N')
