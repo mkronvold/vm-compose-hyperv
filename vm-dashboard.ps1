@@ -1246,47 +1246,51 @@ setInterval(pollContainers, 5000);
                 $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
                 $cred  = New-Object PSCredential('administrator', $secpw)
             }
+            # Scriptblock only returns raw JSON string — all parsing happens here in PS7
             $icArgs = @{ VMName = $vmName; ArgumentList = $ctrName; ScriptBlock = {
                 param($cn)
                 $dockerBin = 'C:\Program Files\Docker'
                 if ($env:Path -notlike "*$dockerBin*") { $env:Path = "$env:Path;$dockerBin" }
-                $insp = & docker inspect $cn 2>$null | ConvertFrom-Json
-                if (-not $insp) { return $null }
-                $i = $insp[0]
-                $ips = @()
-                try {
-                    if ($i.NetworkSettings -and $i.NetworkSettings.Networks) {
-                        $ips = @($i.NetworkSettings.Networks.PSObject.Properties |
-                            ForEach-Object { $_.Value } | Where-Object { $_ } |
-                            ForEach-Object { $_.IPAddress } | Where-Object { $_ })
-                    }
-                } catch { }
-                $ports = '{}'
-                try {
-                    if ($i.NetworkSettings -and $i.NetworkSettings.Ports) {
-                        $ports = "$($i.NetworkSettings.Ports | ConvertTo-Json -Depth 2 -Compress)"
-                    }
-                } catch { }
-                [PSCustomObject]@{
-                    Name    = if ($i.Name) { $i.Name.TrimStart('/') } else { $cn }
-                    Image   = "$($i.Config.Image)"
-                    State   = "$($i.State.Status)"
-                    Created = "$($i.Created)"
-                    Cmd     = if ($i.Config.Cmd) { ($i.Config.Cmd -join ' ') } else { '' }
-                    Env     = @(if ($i.Config.Env) { $i.Config.Env } else { @() })
-                    Mounts  = @(if ($i.Mounts) { $i.Mounts | ForEach-Object {
-                                    "$($_.Source) -> $($_.Destination)$(if ($_.Mode) { " ($($_.Mode))" })"
-                                } } else { @() })
-                    IPs     = $ips
-                    Ports   = $ports
-                }
+                $raw = & docker inspect $cn 2>$null
+                if (-not $raw) { return $null }
+                return ($raw -join '')
             } }
             if ($cred) { $icArgs.Credential = $cred }
-            $info = Invoke-Command @icArgs
+            $rawJson = Invoke-Command @icArgs
 
-            if (-not $info) {
+            if (-not $rawJson) {
                 Write-PodeHtmlResponse -StatusCode 404 -Value "<h3>Container '$ctrName' not found in VM '$vmName'</h3>"
                 return
+            }
+
+            # Parse on the dashboard side (PS7) to avoid PS5.1 ConvertFrom-Json quirks
+            $i = ($rawJson | ConvertFrom-Json)[0]
+
+            $ips = @()
+            try {
+                if ($i.NetworkSettings -and $i.NetworkSettings.Networks) {
+                    $ips = @($i.NetworkSettings.Networks.PSObject.Properties.Value |
+                        Where-Object { $_ } | ForEach-Object { $_.IPAddress } | Where-Object { $_ })
+                }
+            } catch { }
+            $ports = '{}'
+            try {
+                if ($i.NetworkSettings -and $i.NetworkSettings.Ports) {
+                    $ports = $i.NetworkSettings.Ports | ConvertTo-Json -Depth 2 -Compress
+                }
+            } catch { }
+            $info = [PSCustomObject]@{
+                Name    = if ($i.Name) { $i.Name.TrimStart('/') } else { $ctrName }
+                Image   = "$($i.Config.Image)"
+                State   = "$($i.State.Status)"
+                Created = "$($i.Created)"
+                Cmd     = if ($i.Config.Cmd) { ($i.Config.Cmd -join ' ') } else { '' }
+                Env     = @(if ($i.Config.Env) { $i.Config.Env } else { @() })
+                Mounts  = @(if ($i.Mounts) { $i.Mounts | ForEach-Object {
+                                "$($_.Source) -> $($_.Destination)$(if ($_.Mode) { " ($($_.Mode))" })"
+                            } } else { @() })
+                IPs     = $ips
+                Ports   = $ports
             }
 
             $envRows = ($info.Env | ForEach-Object { "<tr><td class='small font-monospace'>$_</td></tr>" }) -join ""
