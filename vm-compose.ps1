@@ -1707,16 +1707,17 @@ function Invoke-DockerComposeInVM {
                 New-Item -ItemType Directory -Path 'C:\Program Files\Docker\cli-plugins' -Force | Out-Null
                 Invoke-WebRequest -UseBasicParsing -Uri $composeAsset.browser_download_url -OutFile $composePluginPath
             }
-            # Reorder args: global flags must come before the subcommand in docker compose v2
+            # Reorder args: global flags must come before the subcommand in docker compose v2.
+            # Scan ALL positions (global flags may appear before or after the subcommand).
             $globalFlagsWithValue = @('--file','-f','--project-directory','--project-name','-p','--env-file','--profile','--progress')
             $globalFlagsNoValue   = @('--ansi','--no-ansi','--compatibility','--dry-run','--verbose')
             $gFlags = @(); $subcmd = $null; $rest = @(); $i = 0
             while ($i -lt $a.Count) {
                 $arg = $a[$i]
-                if ($null -eq $subcmd -and $globalFlagsWithValue -contains $arg) {
+                if ($globalFlagsWithValue -contains $arg) {
                     $gFlags += $arg; $i++
                     if ($i -lt $a.Count) { $gFlags += $a[$i]; $i++ }
-                } elseif ($null -eq $subcmd -and $globalFlagsNoValue -contains $arg) {
+                } elseif ($globalFlagsNoValue -contains $arg) {
                     $gFlags += $arg; $i++
                 } elseif ($null -eq $subcmd -and $arg -notlike '-*') {
                     $subcmd = $arg; $i++
