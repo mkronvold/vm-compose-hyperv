@@ -1248,19 +1248,25 @@ setInterval(pollContainers, 5000);
             }
             $icArgs = @{ VMName = $vmName; ArgumentList = $ctrName; ErrorAction = 'Stop'; ScriptBlock = {
                 param($cn)
+                $dockerBin = 'C:\Program Files\Docker'
+                if ($env:Path -notlike "*$dockerBin*") { $env:Path = "$env:Path;$dockerBin" }
                 $insp = & docker inspect $cn 2>$null | ConvertFrom-Json
                 if (-not $insp) { return $null }
                 $i = $insp[0]
                 [PSCustomObject]@{
-                    Name    = $i.Name.TrimStart('/')
+                    Name    = if ($i.Name) { $i.Name.TrimStart('/') } else { $cn }
                     Image   = $i.Config.Image
                     State   = $i.State.Status
                     Created = $i.Created
-                    Cmd     = ($i.Config.Cmd -join ' ')
-                    Env     = @($i.Config.Env)
-                    Mounts  = @($i.Mounts | ForEach-Object { "$($_.Source) -> $($_.Destination) ($($_.Mode))" })
-                    IPs     = @($i.NetworkSettings.Networks.Values | ForEach-Object { $_.IPAddress })
-                    Ports   = ($i.NetworkSettings.Ports | ConvertTo-Json -Depth 2 -Compress)
+                    Cmd     = if ($i.Config.Cmd) { ($i.Config.Cmd -join ' ') } else { '' }
+                    Env     = @(if ($i.Config.Env) { $i.Config.Env } else { @() })
+                    Mounts  = @(if ($i.Mounts) { $i.Mounts | ForEach-Object { "$($_.Source) -> $($_.Destination) ($($_.Mode))" } } else { @() })
+                    IPs     = @(if ($i.NetworkSettings -and $i.NetworkSettings.Networks) {
+                                    $i.NetworkSettings.Networks.PSObject.Properties.Value | ForEach-Object { $_.IPAddress }
+                                } else { @() })
+                    Ports   = if ($i.NetworkSettings -and $i.NetworkSettings.Ports) {
+                                  ($i.NetworkSettings.Ports | ConvertTo-Json -Depth 2 -Compress)
+                              } else { '{}' }
                 }
             } }
             if ($cred) { $icArgs.Credential = $cred }
