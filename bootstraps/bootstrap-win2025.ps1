@@ -1,4 +1,4 @@
-# Bootstrap script for Windows Server 2025 Evaluation
+# Bootstrap script for Windows Server 2025 (Eval and Licensed editions)
 # Differences from win2022-eval:
 #   - Widgets (TaskbarDa) removed from Server SKU — registry key skipped
 #   - App Installer fallback uses Add-AppxProvisionedPackage (DISM path) first,
