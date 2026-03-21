@@ -5,7 +5,6 @@ $script:bootstrapFailures = 0
 $script:bootstrapState = 'running'
 $script:bootstrapCurrentStep = 'startup'
 $script:dockerDataVol = $null
-$script:wingetCmd = $null
 
 function Write-BootstrapStatus {
     param(
@@ -231,96 +230,28 @@ $null = Invoke-BootstrapStep -Step 'Install Docker Compose plugin' -WarnOnError 
     Invoke-WebRequest -UseBasicParsing -Uri $composeAsset.browser_download_url -OutFile $composePluginPath
 }
 
-$null = Invoke-BootstrapStep -Step 'Ensure winget availability (repair)' -WarnOnError -Action {
-    $script:wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
-    if ($script:wingetCmd) {
-        Write-Host 'winget already available.'
-        return
-    }
-    Install-PackageProvider -Name NuGet -Force | Out-Null
-    Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery -Scope AllUsers -AllowClobber | Out-Null
-    Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-    Repair-WinGetPackageManager -AllUsers -Latest -ErrorAction Stop | Out-Null
-    $script:wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
-    if (-not $script:wingetCmd) {
-        throw 'winget not found after Repair-WinGetPackageManager.'
-    }
+$null = Invoke-BootstrapStep -Step 'Install Git' -WarnOnError -Action {
+    $gitRelease = Invoke-RestMethod 'https://api.github.com/repos/git-for-windows/git/releases/latest' -UseBasicParsing
+    $gitAsset = @($gitRelease.assets | Where-Object { $_.name -match '^Git-[\d.]+-64-bit\.exe$' }) | Select-Object -First 1
+    if (-not $gitAsset) { throw 'Could not find Git x64 installer in release assets.' }
+    Write-Host "Downloading Git $($gitRelease.tag_name)..."
+    $gitInstaller = 'C:\Setup\git-installer.exe'
+    Invoke-WebRequest -UseBasicParsing -Uri $gitAsset.browser_download_url -OutFile $gitInstaller
+    $r = Start-Process -FilePath $gitInstaller -ArgumentList '/VERYSILENT /NORESTART /SP- /COMPONENTS="assoc,assoc_sh"' -Wait -PassThru
+    if ($r.ExitCode -ne 0) { throw "Git installer exited with code $($r.ExitCode)." }
+    $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + $env:PATH
 }
 
-$null = Invoke-BootstrapStep -Step 'Ensure winget availability (App Installer fallback)' -WarnOnError -Action {
-    if ($script:wingetCmd) {
-        Write-Host 'winget already available; skipping fallback.'
-        return
-    }
-    $wingetRelease = Invoke-RestMethod 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing
-    $wingetBundleAsset = @($wingetRelease.assets | Where-Object { $_.name -eq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle' }) | Select-Object -First 1
-    $wingetDepsAsset = @($wingetRelease.assets | Where-Object { $_.name -eq 'DesktopAppInstaller_Dependencies.zip' }) | Select-Object -First 1
-    if (-not $wingetBundleAsset -or -not $wingetDepsAsset) {
-        throw 'Could not find App Installer bundle/dependency assets in winget-cli release assets.'
-    }
-
-    $wingetBundlePath = 'C:\Setup\Microsoft.DesktopAppInstaller.msixbundle'
-    $wingetDepsZipPath = 'C:\Setup\DesktopAppInstaller_Dependencies.zip'
-    $wingetDepsDir = 'C:\Setup\DesktopAppInstaller_Dependencies'
-    Invoke-WebRequest -UseBasicParsing -Uri $wingetDepsAsset.browser_download_url -OutFile $wingetDepsZipPath
-    if (Test-Path $wingetDepsDir) { Remove-Item $wingetDepsDir -Recurse -Force -ErrorAction SilentlyContinue }
-    Expand-Archive -Path $wingetDepsZipPath -DestinationPath $wingetDepsDir -Force
-    $depPkgs = @(Get-ChildItem $wingetDepsDir -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -in @('.appx', '.msix', '.appxbundle', '.msixbundle') -and $_.Name -match 'x64|neutral' } |
-        Select-Object -ExpandProperty FullName)
-
-    Invoke-WebRequest -UseBasicParsing -Uri $wingetBundleAsset.browser_download_url -OutFile $wingetBundlePath
-    if ($depPkgs.Count -gt 0) {
-        Add-AppxPackage -Path $wingetBundlePath -DependencyPath $depPkgs -ErrorAction Stop
-    } else {
-        Add-AppxPackage -Path $wingetBundlePath -ErrorAction Stop
-    }
-    Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' -ErrorAction SilentlyContinue
-    $script:wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
-    if (-not $script:wingetCmd) {
-        throw 'winget remains unavailable after App Installer fallback.'
-    }
-}
-
-$null = Invoke-BootstrapStep -Step 'Install Git and GitHub tooling' -WarnOnError -Action {
-    $wingetExe = if ($script:wingetCmd) { $script:wingetCmd.Source } else { $null }
-    if (-not $wingetExe) {
-        $candidateWingetExe = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
-        if (Test-Path $candidateWingetExe) { $wingetExe = $candidateWingetExe }
-    }
-
-    if ($wingetExe) {
-        Write-Host 'Using winget to install Git and GitHub CLI...'
-        foreach ($pkgId in @('Git.Git','GitHub.cli','GitHub.GitLFS')) {
-            Write-Host "Installing $pkgId via winget..."
-            & $wingetExe install --id $pkgId -e --source winget --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "winget install failed for $pkgId (exit $LASTEXITCODE)." }
-        }
-    } else {
-        Write-Host 'winget not available (common on Windows Server) — using direct downloads...'
-
-        # Git for Windows
-        $gitRelease = Invoke-RestMethod 'https://api.github.com/repos/git-for-windows/git/releases/latest' -UseBasicParsing
-        $gitAsset = @($gitRelease.assets | Where-Object { $_.name -match '^Git-[\d.]+-64-bit\.exe$' }) | Select-Object -First 1
-        if (-not $gitAsset) { throw 'Could not find Git x64 installer in release assets.' }
-        Write-Host "Downloading Git $($gitRelease.tag_name)..."
-        $gitInstaller = 'C:\Setup\git-installer.exe'
-        Invoke-WebRequest -UseBasicParsing -Uri $gitAsset.browser_download_url -OutFile $gitInstaller
-        $r = Start-Process -FilePath $gitInstaller -ArgumentList '/VERYSILENT /NORESTART /SP- /COMPONENTS="assoc,assoc_sh"' -Wait -PassThru
-        if ($r.ExitCode -ne 0) { throw "Git installer exited with code $($r.ExitCode)." }
-        $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + $env:PATH
-
-        # GitHub CLI
-        $ghRelease = Invoke-RestMethod 'https://api.github.com/repos/cli/cli/releases/latest' -UseBasicParsing
-        $ghAsset = @($ghRelease.assets | Where-Object { $_.name -match '^gh_[\d.]+_windows_amd64\.msi$' }) | Select-Object -First 1
-        if (-not $ghAsset) { throw 'Could not find gh CLI MSI in release assets.' }
-        Write-Host "Downloading gh $($ghRelease.tag_name)..."
-        $ghMsi = 'C:\Setup\gh-cli.msi'
-        Invoke-WebRequest -UseBasicParsing -Uri $ghAsset.browser_download_url -OutFile $ghMsi
-        $r = Start-Process msiexec -ArgumentList "/i `"$ghMsi`" /qn /norestart" -Wait -PassThru
-        if ($r.ExitCode -ne 0) { throw "gh CLI MSI installer exited with code $($r.ExitCode)." }
-        $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + $env:PATH
-    }
+$null = Invoke-BootstrapStep -Step 'Install GitHub CLI' -WarnOnError -Action {
+    $ghRelease = Invoke-RestMethod 'https://api.github.com/repos/cli/cli/releases/latest' -UseBasicParsing
+    $ghAsset = @($ghRelease.assets | Where-Object { $_.name -match '^gh_[\d.]+_windows_amd64\.msi$' }) | Select-Object -First 1
+    if (-not $ghAsset) { throw 'Could not find gh CLI MSI in release assets.' }
+    Write-Host "Downloading gh $($ghRelease.tag_name)..."
+    $ghMsi = 'C:\Setup\gh-cli.msi'
+    Invoke-WebRequest -UseBasicParsing -Uri $ghAsset.browser_download_url -OutFile $ghMsi
+    $r = Start-Process msiexec -ArgumentList "/i `"$ghMsi`" /qn /norestart" -Wait -PassThru
+    if ($r.ExitCode -ne 0) { throw "gh CLI MSI installer exited with code $($r.ExitCode)." }
+    $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + $env:PATH
 }
 
 $null = Invoke-BootstrapStep -Step 'Install gh copilot extension' -WarnOnError -Action {
