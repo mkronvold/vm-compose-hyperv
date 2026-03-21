@@ -13,6 +13,9 @@
 Setup/
 autounattend.vfd
 
+# Unattend XML templates (machine-specific, keep locally in unattends/)
+unattends/
+
 # Logs
 *.log
 *.evtx
