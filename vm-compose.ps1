@@ -82,7 +82,7 @@ $KnownCommands = @(
     'up','start','build','down','stop','restart','reboot','destroy','list','status',
     'inspect','describe','show','eventlog','exec','ps','ssh','ip','top','health',
     'docker','docker-compose','docker-test','validate','version',
-    'mount','unmount','storage','localmount','localunmount','cp','copy',
+    'mount','unmount','storage','localmount','localunmount','cp','copy','ls',
     'metrics','web','dashboard','log','getlog','bootlogs','bootlog','note','help'
 )
 
@@ -142,6 +142,7 @@ COMMANDS
   storage pv create/destroy <vm> Create or delete a PV VHDX
   storage pv health [vm]         Health check for persistent volumes
   cp / copy <src> <dest>   Copy files to/from a VM  (prefix VM paths: vmname:path)
+  ls <vm>:<path>           List files inside a VM  (e.g. ls nnta:P:\caddy-docs)
   note <vm> <show|add|edit>  Show, append to, or edit VM notes
 
 SERVICES
@@ -195,6 +196,7 @@ $CommandHelp = @{
     "localmount"   = "localmount <storageName> [driveLetter]`n  Mount a shared storage VHDX to a host drive letter (default S:).`n  Allows direct file access like a Docker volume.`n  Local mount and VM use are mutually exclusive."
     "localunmount" = "localunmount <storageName>`n  Dismount a shared storage VHDX from the host drive."
     "cp"       = "cp / copy <source> <destination>`n  Copy files between host and a running VM.`n  Host to VM:  cp C:\local\file.txt  myvm:C:\dest\`n  VM to host:  cp myvm:C:\path\file.txt  .`n  Prefix VM paths with vmname: (colon). VM-to-host prompts for Administrator credentials."
+    "ls"       = "ls <vm>:<path>`n  List files and directories inside a VM.`n  Example: ./vm-compose.ps1 ls nnta:P:\caddy-docs`n  Noun-verb also works: ./vm-compose.ps1 nnta ls P:\caddy-docs"
     "metrics"  = "metrics [install|start|stop|restart|status|remove]`n  Manage the vm-metrics Prometheus exporter. Default: status.`n  install: run vm-metrics-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-metrics-install.ps1"
     "web"      = "web [install|start|stop|restart|status|remove]`n  Manage the vm-dashboard web UI. Default: status.`n  install: run vm-dashboard-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-dashboard-install.ps1  |  Run directly: ./vm-dashboard.ps1"
     "note"     = "note <vm> <show|add|edit>`n  show: Print the VM's Notes field.`n  add:  Prompt for text and append it to the Notes field.`n  edit: Open the Notes field in Notepad for full editing.`n  Example: ./vm-compose.ps1 solr note show`n  Old form also supported: ./vm-compose.ps1 note show solr"
@@ -3051,6 +3053,35 @@ switch ($Command) {
             Write-Host "  VM to host:  cp myvm:C:\path\file.txt  ." -ForegroundColor Gray
         } else {
             Invoke-VMCopy -Source $VmName -Destination $ExecCommand
+        }
+    }
+
+    "ls" {
+        Assert-Admin
+        # Support two forms:
+        #   ls nnta:P:\path       → $VmName = "nnta:P:\path"
+        #   nnta ls P:\path       → $VmName = "nnta", $ExecCommand = "P:\path"
+        $lsVm = $null; $lsPath = $null
+        if ($VmName -match '^([^:]+):(.*)$' -and $Matches[1].Length -gt 1) {
+            $lsVm = $Matches[1]; $lsPath = $Matches[2]
+        } elseif ($VmName -and $ExecCommand) {
+            $lsVm = $VmName; $lsPath = $ExecCommand
+        } elseif ($VmName) {
+            $lsVm = $VmName; $lsPath = 'C:\'
+        }
+        if (-not $lsVm) {
+            Write-Host "Usage: ./vm-compose.ps1 ls <vm>:<path>" -ForegroundColor Yellow
+            Write-Host "  Example: ./vm-compose.ps1 ls nnta:P:\caddy-docs" -ForegroundColor Gray
+        } else {
+            Write-Host "=== $lsVm`:$lsPath ===" -ForegroundColor Cyan
+            Invoke-Command -VMName $lsVm -Credential (Get-VMCredential $lsVm) -ScriptBlock {
+                param($p)
+                Get-ChildItem -LiteralPath $p -ErrorAction Stop |
+                    Select-Object Mode, LastWriteTime,
+                        @{N='Size';E={ if ($_.PSIsContainer) { '<DIR>' } else { '{0,10:N0}' -f $_.Length } }},
+                        Name |
+                    Format-Table -AutoSize
+            } -ArgumentList $lsPath -ErrorAction SilentlyContinue
         }
     }
 
