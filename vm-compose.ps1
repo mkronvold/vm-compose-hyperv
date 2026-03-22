@@ -51,11 +51,17 @@ param(
     [Alias("h")][switch]$HelpShort,
     [string]$Vm,          # Named override for VM name (-Vm solr or --vm solr)
     [string]$Project,     # Named project shortcut (-Project enshrouded)
-    [string]$ConfigFile = "vmstack.yaml",
+    [string]$ConfigFile = "",
     [string]$VmRoot = "C:\HyperV\VMs"
 )
 
 $Version = "1.1.0"
+
+# Directory the script lives in — used to resolve all supporting files
+# (vmstack.yaml, vm-compose-debug.log, vm-lib.ps1, bootstrap templates, etc.)
+# so the script works regardless of the caller's working directory.
+$RunDir = $PSScriptRoot
+if (-not $ConfigFile) { $ConfigFile = Join-Path $RunDir 'vmstack.yaml' }
 
 # -------------------------
 # Debug logging
@@ -63,7 +69,7 @@ $Version = "1.1.0"
 # Logs to vm-compose-debug.log in the script directory.
 # -------------------------
 $DebugEnabled = ($env:VMCOMPOSE_DEBUG -in @('true','1','yes'))
-$DebugLogFile = Join-Path $PSScriptRoot 'vm-compose-debug.log'
+$DebugLogFile = Join-Path $RunDir 'vm-compose-debug.log'
 
 function Write-DebugLog {
     param(
