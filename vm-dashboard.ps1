@@ -105,11 +105,12 @@ Start-PodeServer -Threads 2 {
                         foreach ($line in $ps) {
                             try {
                                 $c = $line | ConvertFrom-Json
-                                $cpu = '0%'; $mem = '0B / 0B'
+                                $cpu = '0%'; $mem = '0B / 0B'; $netIO = '-'; $blockIO = '-'; $pids = '0'
                                 if ($c -and $c.State -eq 'running' -and $c.Names -and $sm.ContainsKey($c.Names)) {
                                     $cpu = $sm[$c.Names].CPUPerc; $mem = $sm[$c.Names].MemUsage
+                                    $netIO = $sm[$c.Names].NetIO; $blockIO = $sm[$c.Names].BlockIO; $pids = $sm[$c.Names].PIDs
                                 }
-                                if ($c) { $out.Add([PSCustomObject]@{ name=$c.Names; image=$c.Image; status=$c.Status; state=$c.State; cpu=$cpu; mem=$mem; ports=$c.Ports; id=$c.ID }) }
+                                if ($c) { $out.Add([PSCustomObject]@{ name=$c.Names; image=$c.Image; status=$c.Status; state=$c.State; cpu=$cpu; mem=$mem; netIO=$netIO; blockIO=$blockIO; pids=$pids; ports=$c.Ports; id=$c.ID }) }
                             } catch {}
                         }
                         $pvTotal = if ($pvDisk) { [math]::Round($pvDisk.Size / 1GB, 1) } else { $null }
@@ -1024,35 +1025,29 @@ $pvUnmountModal
     # GET /api/vm/:name/docker/:container/stats
     # -------------------------------------------------------
     Add-PodeRoute -Method Get -Path "/api/vm/:name/docker/:container/stats" -ScriptBlock {
-        try {
-            Import-Module powershell-yaml -ErrorAction Stop
-            $vmName    = $WebEvent.Parameters['name']
-            $ctrName   = $WebEvent.Parameters['container']
-            $cfgFile   = Get-PodeState -Name 'ConfigFile'
-            $stack     = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
-            $vmCfg     = $stack.vms[$vmName]
-            $cred      = $null
-            if ($vmCfg -and $vmCfg.admin_password) {
-                $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
-                $cred  = New-Object PSCredential('administrator', $secpw)
-            }
-            $icArgs = @{ VMName = $vmName; ArgumentList = $ctrName; ErrorAction = 'Stop'; ScriptBlock = {
-                param($cn)
-                $s = & docker stats --no-stream --format '{{json .}}' $cn 2>$null | Select-Object -First 1
-                if ($s) {
-                    $o = $s | ConvertFrom-Json
-                    return ([PSCustomObject]@{ cpu=$o.CPUPerc; mem=$o.MemUsage; netIO=$o.NetIO; blockIO=$o.BlockIO; pids=$o.PIDs } | ConvertTo-Json -Compress)
-                } else {
-                    return '{"cpu":"0%","mem":"0B / 0B","netIO":"-","blockIO":"-","pids":"0"}'
+        # Served from DockerStatsPoller cache — no PS Direct call needed.
+        $vmName   = $WebEvent.Parameters['name']
+        $ctrName  = $WebEvent.Parameters['container']
+        $fallback = '{"cpu":"0%","mem":"0B / 0B","netIO":"-","blockIO":"-","pids":"0"}'
+        $jsonStr  = Get-PodeState -Name "DockerCache_$vmName"
+        if ($jsonStr) {
+            try {
+                $cache = $jsonStr | ConvertFrom-Json
+                $ctr = @($cache.containers) | Where-Object { $_.name -eq $ctrName } | Select-Object -First 1
+                if ($ctr) {
+                    $result = [PSCustomObject]@{
+                        cpu     = if ($ctr.cpu)     { $ctr.cpu }     else { '0%' }
+                        mem     = if ($ctr.mem)     { $ctr.mem }     else { '0B / 0B' }
+                        netIO   = if ($ctr.netIO)   { $ctr.netIO }   else { '-' }
+                        blockIO = if ($ctr.blockIO) { $ctr.blockIO } else { '-' }
+                        pids    = if ($ctr.pids)    { $ctr.pids }    else { '0' }
+                    }
+                    Write-PodeTextResponse -ContentType 'application/json' -Value ($result | ConvertTo-Json -Compress)
+                    return
                 }
-            } }
-            if ($cred) { $icArgs.Credential = $cred }
-            $jsonStr = [string](Invoke-Command @icArgs | Where-Object { $_ -is [string] } | Select-Object -Last 1)
-            if (-not $jsonStr) { $jsonStr = '{"cpu":"0%","mem":"0B / 0B","netIO":"-","blockIO":"-","pids":"0"}' }
-            Write-PodeTextResponse -ContentType 'application/json' -Value $jsonStr
-        } catch {
-            Write-PodeJsonResponse -StatusCode 500 -Value @{ error = $_.Exception.Message }
+            } catch {}
         }
+        Write-PodeTextResponse -ContentType 'application/json' -Value $fallback
     }
 
     # -------------------------------------------------------
@@ -1066,18 +1061,22 @@ $pvUnmountModal
             $cfgFile = Get-PodeState -Name 'ConfigFile'
             $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
             $vmCfg   = $stack.vms[$vmName]
-            $cred    = $null
-            if ($vmCfg -and $vmCfg.admin_password) {
-                $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
-                $cred  = New-Object PSCredential('administrator', $secpw)
-            }
-            $icArgs = @{ VMName = $vmName; ArgumentList = $ctrName; ErrorAction = 'Stop'; ScriptBlock = {
-                param($cn)
-                # Force all output (including 2>&1 ErrorRecords) to strings before returning
-                @(& docker logs --timestamps --tail 200 $cn 2>&1) | ForEach-Object { "$_" }
-            } }
-            if ($cred) { $icArgs.Credential = $cred }
-            $lines = @(Invoke-Command @icArgs) | ForEach-Object { "$_" }
+            $pw = if ($vmCfg -and $vmCfg.admin_password) { $vmCfg.admin_password } else { $null }
+            $job = Start-Job -ScriptBlock {
+                param($vmn, $cn, $pw)
+                $cred = if ($pw) { New-Object PSCredential('administrator', (ConvertTo-SecureString $pw -AsPlainText -Force)) } else { $null }
+                $icArgs = @{ VMName = $vmn; ArgumentList = $cn; ScriptBlock = {
+                    param($cn)
+                    $p = 'C:\Program Files\Docker'
+                    if ($env:PATH -notlike "*$p*") { $env:PATH += ";$p" }
+                    @(& docker logs --timestamps --tail 200 $cn 2>&1) | ForEach-Object { "$_" }
+                } }
+                if ($cred) { $icArgs.Credential = $cred }
+                Invoke-Command @icArgs
+            } -ArgumentList $vmName, $ctrName, $pw
+            $null = Wait-Job $job -Timeout 15
+            $lines = @(Receive-Job $job -ErrorAction SilentlyContinue) | ForEach-Object { "$_" }
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
             Write-PodeJsonResponse -Value @{ lines = $lines }
         } catch {
             Write-PodeJsonResponse -StatusCode 500 -Value @{ error = $_.Exception.Message }
@@ -1096,24 +1095,26 @@ $pvUnmountModal
             $cfgFile = Get-PodeState -Name 'ConfigFile'
             $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
             $vmCfg   = $stack.vms[$vmName]
-            $cred    = $null
-            if ($vmCfg -and $vmCfg.admin_password) {
-                $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
-                $cred  = New-Object PSCredential('administrator', $secpw)
-            }
-            $icArgs = @{ VMName = $vmName; ArgumentList = $ctrName,$cmd; ErrorAction = 'Stop'; ScriptBlock = {
-                param($cn, $userCmd)
-                $parts = $userCmd -split '\s+', 2
-                $exe   = $parts[0]
-                $args2 = if ($parts.Count -gt 1) { $parts[1] } else { '' }
-                if ($args2) {
-                    @(& docker exec $cn cmd /c "$exe $args2" 2>&1)
-                } else {
-                    @(& docker exec $cn $exe 2>&1)
-                }
-            } }
-            if ($cred) { $icArgs.Credential = $cred }
-            $output = @(Invoke-Command @icArgs)
+            $pw = if ($vmCfg -and $vmCfg.admin_password) { $vmCfg.admin_password } else { $null }
+            $job = Start-Job -ScriptBlock {
+                param($vmn, $cn, $userCmd, $pw)
+                $cred = if ($pw) { New-Object PSCredential('administrator', (ConvertTo-SecureString $pw -AsPlainText -Force)) } else { $null }
+                $icArgs = @{ VMName = $vmn; ArgumentList = $cn,$userCmd; ScriptBlock = {
+                    param($cn, $userCmd)
+                    $p = 'C:\Program Files\Docker'
+                    if ($env:PATH -notlike "*$p*") { $env:PATH += ";$p" }
+                    $parts = $userCmd -split '\s+', 2
+                    $exe   = $parts[0]
+                    $args2 = if ($parts.Count -gt 1) { $parts[1] } else { '' }
+                    if ($args2) { @(& docker exec $cn cmd /c "$exe $args2" 2>&1) }
+                    else        { @(& docker exec $cn $exe 2>&1) }
+                } }
+                if ($cred) { $icArgs.Credential = $cred }
+                @(Invoke-Command @icArgs)
+            } -ArgumentList $vmName, $ctrName, $cmd, $pw
+            $null = Wait-Job $job -Timeout 30
+            $output = @(Receive-Job $job -ErrorAction SilentlyContinue)
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
             Write-PodeJsonResponse -Value @{ output = ($output -join "`n") }
         } catch {
             Write-PodeJsonResponse -StatusCode 500 -Value @{ error = $_.Exception.Message }
@@ -1434,8 +1435,8 @@ function runCmd() {
 }
 document.getElementById('termInput').addEventListener('keydown', e => { if (e.key === 'Enter') runCmd(); });
 pollStats(); pollLogs();
-setInterval(pollStats, 3000);
-setInterval(pollLogs, 2000);
+setInterval(pollStats, 10000);
+setInterval(pollLogs, 5000);
 </script>
 </body>
 </html>
