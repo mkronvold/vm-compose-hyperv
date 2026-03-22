@@ -83,7 +83,7 @@ $KnownCommands = @(
     'inspect','describe','show','eventlog','exec','ps','ssh','ip','top','health',
     'docker','docker-compose','docker-test','validate','version',
     'mount','unmount','storage','localmount','localunmount','cp','copy',
-    'metrics','web','dashboard','getlog','bootlogs','bootlog','note','help'
+    'metrics','web','dashboard','log','getlog','bootlogs','bootlog','note','help'
 )
 
 # Noun-verb support: if Position 0 looks like a VM name (not a known command),
@@ -118,6 +118,7 @@ COMMANDS
   status [<vm>]            Show status table (all, or a specific VM)
   inspect <vm>             Show detailed info for a VM (aliases: describe, show)
   eventlog <vm>            Show application event log from a VM
+  log [<vm>] [tail]        View the vm-compose debug log (set VMCOMPOSE_DEBUG=1 to enable)
   bootlogs <vm> [tail]     Show bootstrap progress/log output from a VM
   exec <vm> <cmd>          Run a command inside a VM
   docker <vm> <args...>    Run a docker command inside a VM
@@ -175,6 +176,7 @@ $CommandHelp = @{
     "inspect"  = "inspect <vm>  (aliases: describe, show)`n  Show full details for a single VM: CPU, memory, disks, IPs, switches, checkpoints."
     "describe" = "describe <vm>`n  Alias for inspect."
     "show"     = "show <vm>`n  Alias for inspect."
+    "log"      = "log [<vm>] [tail]`n  View the vm-compose debug log (vm-compose-debug.log).`n  Requires VMCOMPOSE_DEBUG=1 to have been set during prior runs.`n  Omit <vm> to show the last N lines (default 100).`n  Specify <vm> or -Project to filter entries for a specific VM.`n  Example: ./vm-compose.ps1 log`n  Example: ./vm-compose.ps1 solr log`n  Example: ./vm-compose.ps1 log 200`n  Example: ./vm-compose.ps1 log -Project enshrouded"
     "eventlog" = "eventlog <vm>`n  Show the 20 most recent Application event log entries from a VM."
     "exec"     = "exec <vm> `"<command>`"`n  Run a command inside a VM via PowerShell Direct."
     "ps"       = "ps <vm>`n  List the top 25 processes by CPU inside a VM."
@@ -2736,6 +2738,41 @@ switch ($Command) {
             Write-Host "Usage: ./vm-compose.ps1 inspect <vmName>" -ForegroundColor Yellow
         } else {
             Get-VMDetails $VmName
+        }
+    }
+
+    "log" {
+        if (-not (Test-Path $DebugLogFile)) {
+            Write-Host "No debug log found at: $DebugLogFile" -ForegroundColor Yellow
+            Write-Host "Enable with: `$env:VMCOMPOSE_DEBUG = '1'" -ForegroundColor Gray
+        } else {
+            $filterVm = $VmName
+            if (-not $filterVm -and $Project) {
+                $proj = Resolve-Project -projectName $Project -stack $stack -explicitVm ''
+                if ($proj) { $filterVm = $proj.VmName }
+            }
+            $tailCount = 100
+            if ($ExecCommand -and ($ExecCommand -as [int])) { $tailCount = [int]$ExecCommand }
+            $lines = @(Get-Content $DebugLogFile -Encoding UTF8)
+            if ($filterVm) {
+                $lines = @($lines | Where-Object { $_ -imatch [regex]::Escape($filterVm) })
+                Write-Host "=== vm-compose debug log — VM: $filterVm ===" -ForegroundColor Cyan
+            } else {
+                $lines = @($lines | Select-Object -Last $tailCount)
+                Write-Host "=== vm-compose debug log (last $tailCount lines) ===" -ForegroundColor Cyan
+            }
+            if ($lines.Count -eq 0) {
+                Write-Host "(no matching entries)" -ForegroundColor DarkGray
+            } else {
+                $lines | ForEach-Object {
+                    $color = if ($_ -match '\[ERROR\]') { 'Red' }
+                             elseif ($_ -match '\[WARN\]')  { 'Yellow' }
+                             elseif ($_ -match '\[BUILD\]') { 'Cyan' }
+                             elseif ($_ -match '\[STEP\]')  { 'Green' }
+                             else { 'Gray' }
+                    Write-Host $_ -ForegroundColor $color
+                }
+            }
         }
     }
 

@@ -536,6 +536,7 @@ $($_.ScriptStackTrace)</pre>
 <body class="bg-light">
 <div class="container mt-4">
   <a href="/" class="btn btn-outline-secondary btn-sm mb-3">&larr; Back</a>
+  <a href="/" class="btn btn-outline-primary btn-sm mb-3 ms-2">&#x1F3E0; Home</a>
   <h2>$vmName <span class="badge bg-$color">$($vm.State)</span>
     <a href="/vm/$vmName/docker" class="btn btn-info btn-sm ms-3">&#x1F433; Docker</a>
   </h2>
@@ -1179,6 +1180,7 @@ $pvUnmountModal
 <div class="container-fluid mt-3">
   <div class="d-flex align-items-center mb-3 gap-3">
     <a href="/vm/$vmName" class="btn btn-outline-secondary btn-sm">&larr; Back</a>
+    <a href="/" class="btn btn-outline-primary btn-sm">&#x1F3E0; Home</a>
     <h3 class="mb-0">&#x1F433; $vmName — Docker</h3>
     <span id="pvBadge" class="badge bg-secondary ms-auto">P: loading...</span>
   </div>
@@ -1322,7 +1324,7 @@ setInterval(pollContainers, 5000);
 <div class="container-fluid mt-3">
   <div class="d-flex align-items-center mb-3 gap-2">
     <a href="/vm/$vmName/docker" class="btn btn-outline-secondary btn-sm">&larr; Back</a>
-    <h3 class="mb-0">&#x1F4E6; $ctrName <span class="badge bg-$stateColor">$($info.State)</span></h3>
+    <a href="/" class="btn btn-outline-primary btn-sm">&#x1F3E0; Home</a>
   </div>
   <div class="row">
     <div class="col-md-5">
