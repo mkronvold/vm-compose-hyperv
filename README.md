@@ -22,7 +22,7 @@ Run **Windows containers** on your Windows 11 machine — using the same familia
 - **`docker` / `docker-compose` pass-through** — run any docker command inside a VM without quoting tricks
 - **Web dashboard** — live VM table with start/stop/restart buttons at `http://localhost:8080`
 - **Prometheus metrics** — per-VM CPU, memory, Docker state, container counts, storage sizes on `:9090/metrics`
-- **PowerShell Direct** — `exec`, `ps`, `ssh`, `cp`, `eventlog`, `health` with no SSH keys required
+- **PowerShell Direct** — `exec`, `ps`, `ssh`, `ls`, `cp`, `eventlog`, `health` with no SSH keys required
 
 > **Note:** Most VM-interaction commands require running as **Administrator** (Hyper-V API requires it). The CLI will tell you if you need to elevate.
 
@@ -297,7 +297,19 @@ Checks:
 
 ---
 
-# File Copy
+# File Operations
+
+## List files inside a VM
+
+```
+./vm-compose.ps1 ls nnta:P:\caddy-docs
+./vm-compose.ps1 nnta ls P:\caddy-docs    # noun-verb form
+./vm-compose.ps1 nnta ls                  # defaults to C:\
+```
+
+Prefix VM paths with `vmname:` (colon). Displays mode, timestamp, size, and name — directories are shown as `<DIR>`.
+
+## Copy files to / from a VM
 
 Copy files between the host and a running VM:
 
@@ -306,7 +318,7 @@ Copy files between the host and a running VM:
 ./vm-compose.ps1 cp winhost1:C:\path\file.txt .
 ```
 
-Prefix VM paths with `vmname:` (colon). VM-to-host copy prompts for Administrator credentials inside the VM.
+Prefix VM paths with `vmname:` (colon). Directories are copied recursively. VM-to-host copy prompts for Administrator credentials inside the VM.
 
 ---
 

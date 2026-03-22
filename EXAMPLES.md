@@ -161,17 +161,26 @@ projects:
 
 ---
 
-## File Copy
+## File Operations
 
 ```powershell
+# List files inside a VM
+./vm-compose.ps1 ls nnta:P:\caddy-docs
+
+# Noun-verb form
+./vm-compose.ps1 nnta ls P:\caddy-docs
+
+# Default to C:\ when no path given
+./vm-compose.ps1 nnta ls
+
 # Copy a file from host to VM
 ./vm-compose.ps1 cp C:\configs\solr.xml solr:C:\Setup\
 
-# Copy a directory from host to VM
+# Copy a directory from host to VM (recursive)
 ./vm-compose.ps1 cp C:\data\ solr:C:\data\
 
 # Copy a host Docker project folder into a VM persistent volume (P:)
-./vm-compose.ps1 cp C:\docker\enshrouded-docker\ solr:P:\enshrouded-docker\
+./vm-compose.ps1 cp C:\docker\caddy-docs nnta:P:\caddy-docs
 
 # Copy a file from VM to host (prompts for credentials inside the VM)
 ./vm-compose.ps1 cp solr:C:\Setup\bootstrap.log .
