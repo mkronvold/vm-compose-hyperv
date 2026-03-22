@@ -80,7 +80,7 @@ function Write-DebugLog {
 # from a command keyword (enables noun-verb ordering: "./vm-compose.ps1 solr restart").
 $KnownCommands = @(
     'up','start','build','down','stop','restart','reboot','destroy','list','status',
-    'inspect','describe','show','logs','exec','ps','ssh','ip','top','health',
+    'inspect','describe','show','eventlog','exec','ps','ssh','ip','top','health',
     'docker','docker-compose','docker-test','validate','version',
     'mount','unmount','storage','localmount','localunmount','cp','copy',
     'metrics','web','dashboard','getlog','bootlogs','bootlog','note','help'
@@ -117,7 +117,7 @@ COMMANDS
   list                     List VM names defined in vmstack.yaml
   status [<vm>]            Show status table (all, or a specific VM)
   inspect <vm>             Show detailed info for a VM (aliases: describe, show)
-  logs <vm>                Show application event log from a VM
+  eventlog <vm>            Show application event log from a VM
   bootlogs <vm> [tail]     Show bootstrap progress/log output from a VM
   exec <vm> <cmd>          Run a command inside a VM
   docker <vm> <args...>    Run a docker command inside a VM
@@ -175,7 +175,7 @@ $CommandHelp = @{
     "inspect"  = "inspect <vm>  (aliases: describe, show)`n  Show full details for a single VM: CPU, memory, disks, IPs, switches, checkpoints."
     "describe" = "describe <vm>`n  Alias for inspect."
     "show"     = "show <vm>`n  Alias for inspect."
-    "logs"     = "logs <vm>`n  Show the 20 most recent Application event log entries from a VM."
+    "eventlog" = "eventlog <vm>`n  Show the 20 most recent Application event log entries from a VM."
     "exec"     = "exec <vm> `"<command>`"`n  Run a command inside a VM via PowerShell Direct."
     "ps"       = "ps <vm>`n  List the top 25 processes by CPU inside a VM."
     "ssh"      = "ssh <vm>`n  Open an interactive PowerShell Direct session inside a VM."
@@ -2739,10 +2739,10 @@ switch ($Command) {
         }
     }
 
-    "logs" {
+    "eventlog" {
         Assert-Admin
         if (-not $VmName) {
-            Write-Host "Usage: ./vm-compose.ps1 logs <vmName>" -ForegroundColor Yellow
+            Write-Host "Usage: ./vm-compose.ps1 <vm> eventlog" -ForegroundColor Yellow
         } else {
             Get-VMLogs $VmName
         }

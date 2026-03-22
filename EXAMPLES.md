@@ -147,7 +147,7 @@ projects:
 
 ```powershell
 # Show recent Application event log from a VM
-./vm-compose.ps1 solr logs
+./vm-compose.ps1 solr eventlog
 
 # List available logs inside a VM
 ./vm-compose.ps1 solr getlog

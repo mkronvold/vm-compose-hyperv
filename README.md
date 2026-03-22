@@ -22,7 +22,7 @@ Run **Windows containers** on your Windows 11 machine — using the same familia
 - **`docker` / `docker-compose` pass-through** — run any docker command inside a VM without quoting tricks
 - **Web dashboard** — live VM table with start/stop/restart buttons at `http://localhost:8080`
 - **Prometheus metrics** — per-VM CPU, memory, Docker state, container counts, storage sizes on `:9090/metrics`
-- **PowerShell Direct** — `exec`, `ps`, `ssh`, `cp`, `logs`, `health` with no SSH keys required
+- **PowerShell Direct** — `exec`, `ps`, `ssh`, `cp`, `eventlog`, `health` with no SSH keys required
 
 > **Note:** Most VM-interaction commands require running as **Administrator** (Hyper-V API requires it). The CLI will tell you if you need to elevate.
 
@@ -213,9 +213,9 @@ Shows:
 
 # Logs & Execution
 
-## View logs from a VM
+## View Windows event log from a VM
 ```
-./vm-compose.ps1 winhost1 logs
+./vm-compose.ps1 winhost1 eventlog
 ```
 
 ## Execute a command inside a VM
