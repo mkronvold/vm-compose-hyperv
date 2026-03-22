@@ -341,6 +341,36 @@ Start-PodeServer -Threads 2 {
 </table>
 "@ } else { "" }
 
+            # ---- Docker containers section ----
+            $dockerRows = ""
+            foreach ($dcVmName in $stack.vms.Keys) {
+                $dc = Get-PodeState -Name "DockerCache_$dcVmName"
+                if (-not $dc) { continue }
+                try {
+                    $dcObj = $dc | ConvertFrom-Json
+                    if (-not $dcObj.dockerRunning) { continue }
+                    foreach ($ctr in $dcObj.containers) {
+                        $stateColor = switch ($ctr.state) {
+                            "running" { "success" } "exited" { "secondary" }
+                            "paused"  { "warning" } default  { "danger" }
+                        }
+                        $ctrLink = "<a href='/vm/$dcVmName/docker/$($ctr.name)'>$($ctr.name)</a>"
+                        $vmLink  = "<a href='/vm/$dcVmName'>$dcVmName</a>"
+                        $badge   = "<span class='badge bg-$stateColor'>$($ctr.state)</span>"
+                        $dockerRows += "<tr><td>$ctrLink</td><td><code class='small'>$($ctr.image)</code></td><td>$vmLink</td><td>$badge <span class='text-muted small'>$($ctr.status)</span></td></tr>"
+                    }
+                } catch { }
+            }
+            $dockerSection = if ($dockerRows) { @"
+<h4 class="mt-4">&#x1F433; Docker Containers</h4>
+<table class="table table-sm table-bordered bg-white shadow-sm">
+  <thead class="table-dark">
+    <tr><th>Container</th><th>Image</th><th>VM</th><th>Status</th></tr>
+  </thead>
+  <tbody>$dockerRows</tbody>
+</table>
+"@ } else { "" }
+
             Write-PodeHtmlResponse -Value @"
 <!doctype html>
 <html lang="en">
@@ -362,6 +392,7 @@ Start-PodeServer -Threads 2 {
     <tbody>$rows</tbody>
   </table>
   $storageSection
+  $dockerSection
   <p class="text-muted small">Metrics: <a href="http://localhost:9090/metrics" target="_blank">http://localhost:9090/metrics</a></p>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
