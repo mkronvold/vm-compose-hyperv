@@ -1130,26 +1130,28 @@ $pvUnmountModal
                 Import-Module powershell-yaml -ErrorAction Stop
                 $vmName  = $WebEvent.Parameters['name']
                 $ctrName = $WebEvent.Parameters['container']
-                $act     = $WebEvent.Parameters['action']  # captured via route wildcard
-                # Re-detect actual action from URL path
                 $urlAct  = ($WebEvent.Request.Url.AbsolutePath -split '/')[-1]
                 $cfgFile = Get-PodeState -Name 'ConfigFile'
                 $stack   = Get-Content $cfgFile -Raw | ConvertFrom-Yaml
                 $vmCfg   = $stack.vms[$vmName]
-                $cred    = $null
-                if ($vmCfg -and $vmCfg.admin_password) {
-                    $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
-                    $cred  = New-Object PSCredential('administrator', $secpw)
-                }
-                $icArgs = @{ VMName = $vmName; ArgumentList = $ctrName,$urlAct; ErrorAction = 'Stop'; ScriptBlock = {
-                    param($cn, $a)
-                    if ($a -eq 'remove') { & docker rm -f $cn 2>&1 }
-                    elseif ($a -eq 'stop') { & docker stop $cn 2>&1 }
-                    elseif ($a -eq 'start') { & docker start $cn 2>&1 }
-                    elseif ($a -eq 'restart') { & docker restart $cn 2>&1 }
-                } }
-                if ($cred) { $icArgs.Credential = $cred }
-                Invoke-Command @icArgs | Out-Null
+                $pw = if ($vmCfg -and $vmCfg.admin_password) { $vmCfg.admin_password } else { $null }
+                $job = Start-Job -ScriptBlock {
+                    param($vmn, $cn, $a, $pw)
+                    $cred = if ($pw) { New-Object PSCredential('administrator', (ConvertTo-SecureString $pw -AsPlainText -Force)) } else { $null }
+                    $icArgs = @{ VMName = $vmn; ArgumentList = $cn,$a; ScriptBlock = {
+                        param($cn, $a)
+                        $p = 'C:\Program Files\Docker'
+                        if ($env:PATH -notlike "*$p*") { $env:PATH += ";$p" }
+                        if ($a -eq 'remove')  { & docker rm -f $cn 2>&1 }
+                        elseif ($a -eq 'stop')    { & docker stop $cn 2>&1 }
+                        elseif ($a -eq 'start')   { & docker start $cn 2>&1 }
+                        elseif ($a -eq 'restart') { & docker restart $cn 2>&1 }
+                    } }
+                    if ($cred) { $icArgs.Credential = $cred }
+                    Invoke-Command @icArgs
+                } -ArgumentList $vmName, $ctrName, $urlAct, $pw
+                $null = Wait-Job $job -Timeout 30
+                Remove-Job $job -Force -ErrorAction SilentlyContinue
             } catch { }
             Move-PodeResponseUrl -Url "/vm/$($WebEvent.Parameters['name'])/docker"
         }
@@ -1246,17 +1248,26 @@ setInterval(pollContainers, 5000);
                 $secpw = ConvertTo-SecureString $vmCfg.admin_password -AsPlainText -Force
                 $cred  = New-Object PSCredential('administrator', $secpw)
             }
-            # Scriptblock only returns raw JSON string — all parsing happens here in PS7
-            $icArgs = @{ VMName = $vmName; ArgumentList = $ctrName; ScriptBlock = {
-                param($cn)
-                $dockerBin = 'C:\Program Files\Docker'
-                if ($env:Path -notlike "*$dockerBin*") { $env:Path = "$env:Path;$dockerBin" }
-                $raw = & docker inspect $cn 2>$null
-                if (-not $raw) { return $null }
-                return ($raw -join '')
-            } }
-            if ($cred) { $icArgs.Credential = $cred }
-            $rawJson = Invoke-Command @icArgs
+            # Use Start-Job to run Invoke-Command -VMName in a fresh STA process.
+            # Pode's worker threads are MTA; PowerShell Direct (VMName) needs STA COM access.
+            $pw = if ($vmCfg -and $vmCfg.admin_password) { $vmCfg.admin_password } else { $null }
+            $job = Start-Job -ScriptBlock {
+                param($vmn, $cn, $pw)
+                $cred = if ($pw) { New-Object PSCredential('administrator', (ConvertTo-SecureString $pw -AsPlainText -Force)) } else { $null }
+                $icArgs = @{ VMName = $vmn; ArgumentList = $cn; ScriptBlock = {
+                    param($cn)
+                    $p = 'C:\Program Files\Docker'
+                    if ($env:PATH -notlike "*$p*") { $env:PATH += ";$p" }
+                    $raw = & docker inspect $cn 2>$null
+                    if (-not $raw) { return $null }
+                    return ($raw -join '')
+                } }
+                if ($cred) { $icArgs.Credential = $cred }
+                Invoke-Command @icArgs
+            } -ArgumentList $vmName, $ctrName, $pw
+            $null = Wait-Job $job -Timeout 20
+            $rawJson = Receive-Job $job -ErrorAction SilentlyContinue
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
 
             if (-not $rawJson) {
                 Write-PodeHtmlResponse -StatusCode 404 -Value "<h3>Container '$ctrName' not found in VM '$vmName'</h3>"
