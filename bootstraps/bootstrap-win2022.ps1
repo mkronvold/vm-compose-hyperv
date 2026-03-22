@@ -92,7 +92,17 @@ $null = Invoke-BootstrapStep -Step 'Apply desktop UX defaults' -WarnOnError -Act
     reg.exe add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v "TaskbarMn" /t REG_DWORD /d 0 /f | Out-Null
 }
 
-$null = Invoke-BootstrapStep -Step 'Disable sleep timeouts' -WarnOnError -Action {
+$null = Invoke-BootstrapStep -Step 'Pin Server Manager to taskbar' -WarnOnError -Action {
+    $pinnedDir = "$env:APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"
+    if (-not (Test-Path $pinnedDir)) { New-Item -Path $pinnedDir -ItemType Directory -Force | Out-Null }
+    $wsh = New-Object -ComObject WScript.Shell
+    $lnk = $wsh.CreateShortcut("$pinnedDir\Server Manager.lnk")
+    $lnk.TargetPath = "$env:SystemRoot\System32\ServerManager.exe"
+    $lnk.Save()
+    Write-Host "Pinned Server Manager to taskbar."
+}
+
+$null = Invoke-BootstrapStep -Step 'Disable sleep timeouts'-WarnOnError -Action {
     powercfg -X -standby-timeout-ac 0
     powercfg -X -standby-timeout-dc 0
 }
