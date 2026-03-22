@@ -78,6 +78,28 @@ vms:
 
 ---
 
+# Usage
+
+Commands follow a **noun-verb** ordering: `./vm-compose.ps1 <vm> <command>`.  
+VM-targeting commands accept both orderings for backward compatibility:
+
+```
+./vm-compose.ps1 solr restart         # preferred: noun-verb
+./vm-compose.ps1 restart solr         # also works (legacy verb-noun)
+./vm-compose.ps1 restart -Vm solr     # explicit -Vm flag (most portable in scripts)
+```
+
+Commands with no VM target (acting on all VMs or the service layer) are unchanged:
+```
+./vm-compose.ps1 up
+./vm-compose.ps1 down
+./vm-compose.ps1 health
+./vm-compose.ps1 web restart
+./vm-compose.ps1 metrics
+```
+
+---
+
 # Commands
 
 ## Start / build all VMs
@@ -104,6 +126,11 @@ Creates:
 ## Restart all VMs
 ```
 ./vm-compose.ps1 restart
+```
+
+## Restart a single VM
+```
+./vm-compose.ps1 solr restart
 ```
 
 ## Destroy VMs (persistent disks preserved when present)
@@ -169,7 +196,7 @@ Displays:
 
 ## Inspect a single VM
 ```
-./vm-compose.ps1 inspect winhost1
+./vm-compose.ps1 winhost1 inspect
 ```
 
 Shows:
@@ -188,45 +215,47 @@ Shows:
 
 ## View logs from a VM
 ```
-./vm-compose.ps1 logs winhost1
+./vm-compose.ps1 winhost1 logs
 ```
 
 ## Execute a command inside a VM
 ```
-./vm-compose.ps1 exec winhost1 "ipconfig"
+./vm-compose.ps1 winhost1 exec "ipconfig"
 ```
 
 ## Run a docker command inside a VM
 ```
-./vm-compose.ps1 docker winhost1 ps
-./vm-compose.ps1 docker winhost1 images
-./vm-compose.ps1 docker winhost1 run --rm mcr.microsoft.com/windows/nanoserver:ltsc2022 cmd /c echo hello
+./vm-compose.ps1 winhost1 docker ps
+./vm-compose.ps1 winhost1 docker images
+./vm-compose.ps1 winhost1 docker run --rm mcr.microsoft.com/windows/nanoserver:ltsc2022 cmd /c echo hello
 ```
 
 `docker-compose` runs `docker compose` inside the VM:
 ```
-./vm-compose.ps1 docker-compose winhost1 ps
-./vm-compose.ps1 docker-compose solr build P:\enshrouded-docker --file P:\enshrouded-docker\docker-compose.yml
+./vm-compose.ps1 winhost1 docker-compose ps
+./vm-compose.ps1 winhost1 docker-compose --project-directory P:\myapp -f P:\myapp\docker-compose.yml build
 ```
 
-Passes all arguments directly to `docker compose` inside the VM via PowerShell Direct.
-
-> **Tip:** args that match PowerShell parameter names (e.g. `-Force`) should be quoted: `'-Force'`
+With a project shortcut defined in `vmstack.yaml` under `projects:`:
+```
+./vm-compose.ps1 winhost1 docker-compose -Project myapp build
+./vm-compose.ps1 docker-compose -Project myapp build   # VM derived from project definition
+```
 
 ## Run a hello-world container test
 ```
-./vm-compose.ps1 docker-test winhost1
+./vm-compose.ps1 winhost1 docker-test
 ```
 
 Pulls and runs a nanoserver container, auto-detecting the correct image tag (ltsc2022/ltsc2025). Starts the Docker service if it's stopped.
 
 ## Fetch a specific log from a VM
 ```
-./vm-compose.ps1 getlog winhost1              # list available logs
-./vm-compose.ps1 getlog bootstrap winhost1    # fetch bootstrap log
-./vm-compose.ps1 getlog docker winhost1       # fetch docker install log
-./vm-compose.ps1 bootlogs winhost1            # bootstrap summary + latest 200 lines (latest run)
-./vm-compose.ps1 bootlogs winhost1 500        # same, custom tail size
+./vm-compose.ps1 winhost1 getlog              # list available logs
+./vm-compose.ps1 winhost1 getlog bootstrap    # fetch bootstrap log
+./vm-compose.ps1 winhost1 getlog docker       # fetch docker event log
+./vm-compose.ps1 winhost1 bootlogs            # bootstrap summary + latest 200 lines
+./vm-compose.ps1 winhost1 bootlogs 500        # same, custom tail size
 ```
 
 ---
@@ -235,22 +264,22 @@ Pulls and runs a nanoserver container, auto-detecting the correct image tag (lts
 
 ## Process list inside a VM
 ```
-./vm-compose.ps1 ps winhost1
+./vm-compose.ps1 winhost1 ps
 ```
 
 ## Open an interactive shell inside a VM
 ```
-./vm-compose.ps1 ssh winhost1
+./vm-compose.ps1 winhost1 ssh
 ```
 
 ## Print only the VM's IP address
 ```
-./vm-compose.ps1 ip winhost1
+./vm-compose.ps1 winhost1 ip
 ```
 
 ## Live CPU/memory usage
 ```
-./vm-compose.ps1 top winhost1
+./vm-compose.ps1 winhost1 top
 ```
 
 ## Cluster-wide health check
@@ -286,9 +315,9 @@ Prefix VM paths with `vmname:` (colon). VM-to-host copy prompts for Administrato
 Attach freeform notes to any VM:
 
 ```
-./vm-compose.ps1 note show winhost1    # print notes
-./vm-compose.ps1 note add winhost1     # append text
-./vm-compose.ps1 note edit winhost1    # open in Notepad
+./vm-compose.ps1 winhost1 note show    # print notes
+./vm-compose.ps1 winhost1 note add     # append text
+./vm-compose.ps1 winhost1 note edit    # open in Notepad
 ```
 
 ---
@@ -404,9 +433,33 @@ vms:
 ./vm-compose.ps1 storage shared localmount <name>    # mount on host (default S:)
 ./vm-compose.ps1 storage shared localunmount <name>  # dismount from host
 ./vm-compose.ps1 storage shared health [name]        # health check
-./vm-compose.ps1 mount winhost1 shareddata           # hot-add to a running VM
-./vm-compose.ps1 unmount winhost1 shareddata         # remove from a running VM
+./vm-compose.ps1 winhost1 mount shareddata           # hot-add to a running VM
+./vm-compose.ps1 winhost1 unmount shareddata         # remove from a running VM
 ```
+
+---
+
+# Docker Compose Projects
+
+Define docker compose projects in `vmstack.yaml` to avoid repeating `--project-directory` and `-f` on every command:
+
+```yaml
+projects:
+  myapp:
+    project_vm: winhost1           # which VM hosts this project
+    project_folder: P:\myapp-docker  # full path (or relative → resolved from P:\)
+    project_type: docker-compose   # docker-compose (default) or docker
+```
+
+Then use the `-Project` flag:
+
+```
+./vm-compose.ps1 winhost1 docker-compose -Project myapp build
+./vm-compose.ps1 winhost1 docker-compose -Project myapp up -d
+./vm-compose.ps1 docker-compose -Project myapp ps   # VM from project definition
+```
+
+The `-Project` flag expands to `--project-directory <folder> -f <folder>\docker-compose.yml` automatically.
 
 ---
 

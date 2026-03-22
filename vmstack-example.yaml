@@ -28,7 +28,52 @@ storage:
     path: "storage/pv-winhost2.vhdx"
     size_gb: 30
 
+# projects: defines named docker projects that live on VM persistent drives.
+# Used with -Project flag:  ./vm-compose.ps1 winhost1 docker-compose -Project myapp build
+# project_vm:     which VM hosts this project
+# project_folder: full path inside the VM, or relative (resolved from P:\)
+# project_type:   docker-compose (default) or docker
+projects:
+  myapp:
+    project_vm: winhost1
+    project_folder: P:\myapp-docker       # full path inside the VM
+    project_type: docker-compose
+  # another-app:
+  #   project_vm: winhost2
+  #   project_folder: another-app-docker  # relative — resolved to P:\another-app-docker
+  #   project_type: docker-compose
+
 vms:
+  winhost1:
+    iso: "C:/ISOs/SERVER_EVAL_x64FRE_en-us.iso"
+    bootstrap_template: "bootstraps/bootstrap-win2022.ps1"   # relative to unattends/; defaults to bootstrap-win2022.ps1
+    # product_key: "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"   # optional: activate + convert from Eval ISO to full edition
+    # product_type: "WINDOWS SERVER 2022 STANDARD"    # required with product_key; used by DISM to set edition
+    # product_notes: "use dism to convert from eval to retail"  # informational only
+    # admin_password: "YourPassword123"        # optional; used by health/getlog/exec/ssh to avoid prompts (lab use only — store securely in production)
+    memory_gb: 8
+    cpus: 4
+    os_disk_gb: 80
+    persistent_disk_gb: 50   # optional legacy Docker PV; omit to skip persistent-storage.vhdx
+    network: external
+    mac_address: "00:15:5D:AB:CD:01"   # optional — omit for dynamic MAC
+    mount:
+      - shareddata
+      - pv-winhost1
+
+  winhost2:
+    iso: "C:/ISOs/SERVER_EVAL_x64FRE_en-us.iso"
+    bootstrap_template: "bootstraps/bootstrap-win2025.ps1"
+    memory_gb: 4
+    cpus: 2
+    os_disk_gb: 60
+    # persistent_disk_gb: 30  # optional legacy Docker PV
+    network: natnet
+    # mac_address: "00:15:5D:AB:CD:02"   # uncomment to pin MAC
+    mount:
+      - shareddata
+      - pv-winhost2
+
   winhost1:
     iso: "C:/ISOs/SERVER_EVAL_x64FRE_en-us.iso"
     bootstrap_template: "bootstraps/bootstrap-win2022.ps1"   # relative to unattends/; defaults to bootstrap-win2022.ps1

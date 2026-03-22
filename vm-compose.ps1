@@ -33,7 +33,6 @@
 
 param(
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("up","start","build","down","stop","restart","reboot","destroy","list","status","inspect","describe","show","logs","exec","ps","ssh","ip","top","health","docker","docker-compose","docker-test","validate","version","mount","unmount","storage","localmount","localunmount","cp","copy","metrics","web","dashboard","getlog","bootlogs","bootlog","note","help")]
     [string]$Command,
 
     [Parameter(Position=1)]
@@ -50,41 +49,69 @@ param(
     [switch]$Force,
     [switch]$Help,
     [Alias("h")][switch]$HelpShort,
+    [string]$Vm,          # Named override for VM name (-Vm solr or --vm solr)
+    [string]$Project,     # Named project shortcut (-Project enshrouded)
     [string]$ConfigFile = "vmstack.yaml",
     [string]$VmRoot = "C:\HyperV\VMs"
 )
 
 $Version = "1.1.0"
 
+# All recognized command keywords. Used to distinguish a VM name at position 0
+# from a command keyword (enables noun-verb ordering: "./vm-compose.ps1 solr restart").
+$KnownCommands = @(
+    'up','start','build','down','stop','restart','reboot','destroy','list','status',
+    'inspect','describe','show','logs','exec','ps','ssh','ip','top','health',
+    'docker','docker-compose','docker-test','validate','version',
+    'mount','unmount','storage','localmount','localunmount','cp','copy',
+    'metrics','web','dashboard','getlog','bootlogs','bootlog','note','help'
+)
+
+# Noun-verb support: if Position 0 looks like a VM name (not a known command),
+# swap it with Position 1 so the rest of the script sees the canonical verb-noun layout.
+# Both orderings then work: "restart solr" and "solr restart" are equivalent.
+# The -Vm named parameter always wins over positional detection.
+if ($Vm) {
+    # -Vm flag was explicitly supplied; use it as the VM name regardless of ordering.
+    if (-not $VmName) { $VmName = $Vm }
+}
+if ($Command -and $Command -notin $KnownCommands) {
+    # Position 0 is not a command keyword — treat it as the VM name.
+    $Command, $VmName = $VmName, $Command
+}
+# Apply -Vm override after swap (handles "-Vm solr restart" where $Command bound correctly).
+if ($Vm -and -not $VmName) { $VmName = $Vm }
+
 $HelpText = @"
 vm-compose $Version — Hyper-V Compose
 
 USAGE
-  ./vm-compose.ps1 <command> [options]
+  ./vm-compose.ps1 <vm> <command> [options]   (noun-verb — preferred)
+  ./vm-compose.ps1 <command> [<vm>] [options]  (verb-noun — also supported)
 
 COMMANDS
-  up / start [<vm>]   Build and start VMs (all, or a specific VM)
-  build [<vm>]        Provision VMs without starting (all, or a specific VM)
-  down / stop [<vm>]  Stop VMs (all, or a specific VM)
+  up / start [<vm>]        Build and start VMs (all, or a specific VM)
+  build [<vm>]             Provision VMs without starting (all, or a specific VM)
+  down / stop [<vm>]       Stop VMs (all, or a specific VM)
   restart / reboot [<vm>]  Restart VMs (all, or a specific VM)
-  destroy [<vm>]  Delete VM definitions (all, or a specific VM)
-  list            List VM names defined in vmstack.yaml
-  status [<vm>]   Show status table (all, or a specific VM)
-  inspect <vm>    Show detailed info for a VM (aliases: describe, show)
-  logs <vm>       Show application event log from a VM
-  bootlogs <vm> [tail]  Show bootstrap progress/log output from a VM
-  exec <vm> <cmd> Run a command inside a VM
-  docker <vm> <docker args...>         Run a docker command inside a VM
-  docker-compose <vm> <compose args...> Run docker compose inside a VM
-  ps <vm>         List processes inside a VM
-  ssh <vm>        Open an interactive shell inside a VM
-  ip <vm>         Print the VM's IP address
-  top <vm>        Live CPU/memory usage
-  health [<vm>]   Health check (all, or a specific VM)
-  validate        Lint vmstack.yaml for errors
-  version         Show version info
-  mount <vm> <storage>    Hot-add a shared storage disk to a VM
-  unmount <vm> <storage>  Remove a shared storage disk from a VM
+  destroy [<vm>]           Delete VM definitions (all, or a specific VM)
+  list                     List VM names defined in vmstack.yaml
+  status [<vm>]            Show status table (all, or a specific VM)
+  inspect <vm>             Show detailed info for a VM (aliases: describe, show)
+  logs <vm>                Show application event log from a VM
+  bootlogs <vm> [tail]     Show bootstrap progress/log output from a VM
+  exec <vm> <cmd>          Run a command inside a VM
+  docker <vm> <args...>    Run a docker command inside a VM
+  docker-compose <vm> <args...>  Run docker compose inside a VM
+  ps <vm>                  List processes inside a VM
+  ssh <vm>                 Open an interactive shell inside a VM
+  ip <vm>                  Print the VM's IP address
+  top <vm>                 Live CPU/memory usage
+  health [<vm>]            Health check (all, or a specific VM)
+  validate                 Lint vmstack.yaml for errors
+  version                  Show version info
+  mount <vm> <storage>     Hot-add a shared storage disk to a VM
+  unmount <vm> <storage>   Remove a shared storage disk from a VM
   storage shared ls              List shared storage volumes
   storage shared localmount <n>  Mount shared VHDX on host (default S:)
   storage shared localunmount <n> Dismount shared VHDX from host
@@ -94,19 +121,29 @@ COMMANDS
   storage pv localunmount <vm>   Dismount persistent disk from host
   storage pv create/destroy <vm> Create or delete a PV VHDX
   storage pv health [vm]         Health check for persistent volumes
-  cp / copy <src> <dest>  Copy files to/from a VM  (prefix VM paths: vmname:path)
-  note <show|add|edit> <vm>  Show, append to, or edit VM notes
+  cp / copy <src> <dest>   Copy files to/from a VM  (prefix VM paths: vmname:path)
+  note <vm> <show|add|edit>  Show, append to, or edit VM notes
 
 SERVICES
   web [install|start|stop|restart|status|remove]     Manage the web dashboard (port 8080)
   metrics [install|start|stop|restart|status|remove] Manage the Prometheus metrics exporter (port 9090)
 
 OPTIONS
+  -Vm <name>      Named VM selector (alternative to positional <vm>)
+  -Project <name> Use a named project from vmstack.yaml projects: section
   -DryRun         Preview changes without executing them
   -Force          Skip confirmation prompts (e.g. rebuild existing VM)
   -ConfigFile     Path to YAML config (default: vmstack.yaml)
   -VmRoot         Root path for VM storage (default: C:\HyperV\VMs)
   -Help, -h       Show this help message
+
+EXAMPLES
+  ./vm-compose.ps1 solr restart                              # noun-verb
+  ./vm-compose.ps1 restart solr                              # verb-noun (also valid)
+  ./vm-compose.ps1 restart -Vm solr                          # named flag
+  ./vm-compose.ps1 solr docker ps -a
+  ./vm-compose.ps1 solr docker-compose -Project enshrouded build
+  ./vm-compose.ps1 docker-compose -Project enshrouded build  # VM from project definition
 "@
 
 $CommandHelp = @{
@@ -126,8 +163,8 @@ $CommandHelp = @{
     "ip"       = "ip <vm>`n  Print the VM's first IPv4 address."
     "top"      = "top <vm>`n  Live CPU/memory loop (Ctrl+C to exit)."
     "health"       = "health [<vm>]`n  Health check: VM state, bootstrap progress, and Docker readiness. Omit <vm> for all."
-    "docker"       = "docker <vm> <docker args...>`n  Run a docker command inside a VM via PowerShell Direct.`n  Example: ./vm-compose.ps1 docker solr ps`n  Example: ./vm-compose.ps1 docker solr run --rm mcr.microsoft.com/windows/nanoserver:ltsc2022 cmd /c echo hello`n  Note: args that match PowerShell parameter names (e.g. -Force) must be quoted."
-    "docker-compose" = "docker-compose <vm> <compose args...>`n  Runs 'docker compose' inside a VM via PowerShell Direct.`n  Example: ./vm-compose.ps1 docker-compose solr version`n  Example: ./vm-compose.ps1 docker-compose solr build P:\app --file P:\app\docker-compose.yml"
+    "docker"       = "docker <vm> <docker args...>`n  Run a docker command inside a VM via PowerShell Direct.`n  Use -Vm or noun-verb form: ./vm-compose.ps1 solr docker ps`n  Example: ./vm-compose.ps1 solr docker ps -a`n  Example: ./vm-compose.ps1 solr docker run --rm mcr.microsoft.com/windows/nanoserver:ltsc2022 cmd /c echo hello`n  With project: ./vm-compose.ps1 solr docker -Project myapp build`n  Note: args that match PowerShell parameter names (e.g. -Force) must be quoted."
+    "docker-compose" = "docker-compose <vm> <compose args...>`n  Runs 'docker compose' inside a VM via PowerShell Direct.`n  Use noun-verb form: ./vm-compose.ps1 solr docker-compose version`n  With project shortcut: ./vm-compose.ps1 solr docker-compose -Project enshrouded build`n  Or with explicit flags: ./vm-compose.ps1 solr docker-compose --project-directory P:\app -f P:\app\docker-compose.yml build`n  Projects are defined in the projects: section of vmstack.yaml."
     "docker-test"  = "docker-test <vm>`n  Pull and run a nanoserver hello-world container inside a VM.`n  Auto-detects the OS build to select the correct image tag (ltsc2022, ltsc2025).`n  Starts the Docker service if it is stopped."
     "validate" = "validate`n  Lint vmstack.yaml for missing required fields and broken references.`n  Note: persistent_disk_gb is optional."
     "version"  = "version`n  Print version, PowerShell version, and active config file path."
@@ -139,8 +176,8 @@ $CommandHelp = @{
     "cp"       = "cp / copy <source> <destination>`n  Copy files between host and a running VM.`n  Host to VM:  cp C:\local\file.txt  myvm:C:\dest\`n  VM to host:  cp myvm:C:\path\file.txt  .`n  Prefix VM paths with vmname: (colon). VM-to-host prompts for Administrator credentials."
     "metrics"  = "metrics [install|start|stop|restart|status|remove]`n  Manage the vm-metrics Prometheus exporter. Default: status.`n  install: run vm-metrics-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-metrics-install.ps1"
     "web"      = "web [install|start|stop|restart|status|remove]`n  Manage the vm-dashboard web UI. Default: status.`n  install: run vm-dashboard-install.ps1`n  status: shows running state, install method (Windows service or Task Scheduler).`n  remove: stops and unregisters the service/task.`n  Install with: ./vm-dashboard-install.ps1  |  Run directly: ./vm-dashboard.ps1"
-    "note"     = "note <show|add|edit> <vm>`n  show: Print the VM's Notes field.`n  add:  Prompt for text and append it to the Notes field.`n  edit: Open the Notes field in Notepad for full editing."
-    "getlog"   = "getlog <vm>`n  List logs available inside a VM and whether they exist.`n  getlog <logtype> <vm>  Fetch a specific log.`n  Log types: bootstrap, setup, setuperr, docker"
+    "note"     = "note <vm> <show|add|edit>`n  show: Print the VM's Notes field.`n  add:  Prompt for text and append it to the Notes field.`n  edit: Open the Notes field in Notepad for full editing.`n  Example: ./vm-compose.ps1 solr note show`n  Old form also supported: ./vm-compose.ps1 note show solr"
+    "getlog"   = "getlog <vm> [logtype]`n  List logs available inside a VM and whether they exist.`n  getlog <vm> <logtype>  Fetch a specific log.`n  Example: ./vm-compose.ps1 solr getlog bootstrap`n  Old form also supported: ./vm-compose.ps1 getlog bootstrap solr`n  Log types: bootstrap, setup, setuperr, docker"
     "bootlogs" = "bootlogs <vm> [tail]`n  Show C:\Setup\bootstrap.log from the VM with bootstrap progress summary.`n  tail defaults to 200 lines from the latest bootstrap run."
     "help"     = "help [<command>]`n  Show help. Run 'help <command>' for details on a specific command."
 }
@@ -161,6 +198,13 @@ if ($Help -or $HelpShort -or -not $Command -or $Command -eq "help") {
         Write-Host $HelpText
     }
     exit 0
+}
+
+# Validate that command is recognized (replaces ValidateSet which was on param block)
+if ($Command -and $Command -notin $KnownCommands) {
+    Write-Host "Unknown command: '$Command'" -ForegroundColor Red
+    Write-Host "Run './vm-compose.ps1 help' for a list of commands." -ForegroundColor Yellow
+    exit 1
 }
 
 # Per-command help when passed as a sub-argument: ./vm-compose.ps1 <command> help
@@ -1739,6 +1783,42 @@ function Invoke-DockerComposeInVM {
     }
 }
 
+function Resolve-Project {
+    <#
+    .SYNOPSIS
+    Resolves a -Project name to VM name and folder path from the projects: section of vmstack.yaml.
+    Returns a hashtable with keys: VmName, Folder, Type.
+    Writes an error and returns $null on failure.
+    #>
+    param([string]$projectName, [hashtable]$stack, [string]$explicitVm = '')
+
+    if (-not $stack.projects -or -not $stack.projects[$projectName]) {
+        Write-Host "Project '$projectName' not found in vmstack.yaml projects: section." -ForegroundColor Red
+        return $null
+    }
+    $proj = $stack.projects[$projectName]
+    $projVm     = "$($proj.project_vm)"
+    $projFolder = "$($proj.project_folder)"
+    $projType   = if ($proj.project_type) { "$($proj.project_type)" } else { 'docker-compose' }
+
+    if ($explicitVm -and $projVm -and $explicitVm -ne $projVm) {
+        Write-Host "VM mismatch: explicitly specified '$explicitVm' but project '$projectName' is configured for '$projVm'." -ForegroundColor Red
+        return $null
+    }
+    $resolvedVm = if ($explicitVm) { $explicitVm } else { $projVm }
+    if (-not $resolvedVm) {
+        Write-Host "Project '$projectName' has no project_vm set." -ForegroundColor Red
+        return $null
+    }
+
+    # Resolve folder: if it doesn't start with a drive letter, treat as relative to P:\
+    if ($projFolder -notmatch '^[A-Za-z]:\\') {
+        $projFolder = "P:\$projFolder"
+    }
+
+    return @{ VmName = $resolvedVm; Folder = $projFolder; Type = $projType }
+}
+
 function Invoke-DockerTest {
     param([string]$vmName)
 
@@ -2620,18 +2700,26 @@ switch ($Command) {
             setuperr  = @{ Path = 'C:\Windows\Panther\setuperr.log';           Desc = 'Windows Setup errors' }
             docker    = @{ Path = $null;                                        Desc = 'Docker daemon (Windows Event Log)' }
         }
+        $logTypeKeywords = @($knownLogs.Keys)
 
-        $logType  = $VmName       # position 1: log type OR vm name when listing
-        $vmTarget = $ExecCommand  # position 2: vm name when fetching
-
-        # "getlog <vm>" with no log type → list available logs
-        if ($logType -and -not $vmTarget -and -not $knownLogs.Contains($logType.ToLower())) {
-            $vmTarget = $logType; $logType = $null
+        # Support both orderings:
+        #   New (noun-verb): ./vm-compose.ps1 solr getlog [logtype]  → $VmName=solr $ExecCommand=logtype
+        #   Old (verb-noun): ./vm-compose.ps1 getlog [logtype] <vm>  → $VmName=logtype|vm $ExecCommand=vm
+        if ($VmName -and $VmName.ToLower() -in $logTypeKeywords) {
+            # Old form: getlog <logtype> <vm>
+            $logType = $VmName; $vmTarget = $ExecCommand
+        } elseif ($ExecCommand -and $ExecCommand.ToLower() -in $logTypeKeywords) {
+            # New form: <vm> getlog <logtype>
+            $vmTarget = $VmName; $logType = $ExecCommand
+        } else {
+            # Either "getlog <vm>" (old, list mode) or "<vm> getlog" (new, list mode)
+            $vmTarget = if ($VmName) { $VmName } else { $null }
+            $logType  = $null
         }
 
         if (-not $vmTarget) {
-            Write-Host "Usage: ./vm-compose.ps1 getlog <vm>                 # list available logs" -ForegroundColor Yellow
-            Write-Host "       ./vm-compose.ps1 getlog <logtype> <vm>       # fetch a log" -ForegroundColor Yellow
+            Write-Host "Usage: ./vm-compose.ps1 <vm> getlog                 # list available logs" -ForegroundColor Yellow
+            Write-Host "       ./vm-compose.ps1 <vm> getlog <logtype>       # fetch a log" -ForegroundColor Yellow
             Write-Host "  Log types: $($knownLogs.Keys -join ', ')" -ForegroundColor Gray
         } elseif (-not $logType) {
             # List mode: show each log and whether it exists on the VM
@@ -2738,26 +2826,37 @@ switch ($Command) {
 
     "docker" {
         Assert-Admin
-        if (-not $VmName) {
-            Write-Host "Usage: ./vm-compose.ps1 docker <vmName> <docker args...>" -ForegroundColor Yellow
-        } else {
-            $allDockerArgs = @()
-            if ($ExecCommand) { $allDockerArgs += $ExecCommand }
-            if ($StorageName) { $allDockerArgs += $StorageName }
-            if ($ExtraArg)    { $allDockerArgs += $ExtraArg }
-            if ($DockerArgs)  { $allDockerArgs += $DockerArgs }
-            if (-not $allDockerArgs) {
-                Write-Host "Usage: ./vm-compose.ps1 docker <vmName> <docker args...>" -ForegroundColor Yellow
-            } else {
-                Invoke-DockerInVM $VmName $allDockerArgs
+        $targetVm = $VmName
+        $allDockerArgs = @()
+        if ($ExecCommand) { $allDockerArgs += $ExecCommand }
+        if ($StorageName) { $allDockerArgs += $StorageName }
+        if ($ExtraArg)    { $allDockerArgs += $ExtraArg }
+        if ($DockerArgs)  { $allDockerArgs += $DockerArgs }
+
+        if ($Project) {
+            $proj = Resolve-Project -projectName $Project -stack $stack -explicitVm $targetVm
+            if (-not $proj) { break }
+            $targetVm = $proj.VmName
+            if ($proj.Type -eq 'docker-compose') {
+                Write-Host "Note: project '$Project' has type 'docker-compose' — use the docker-compose command instead." -ForegroundColor Yellow
             }
+            # Append project folder as context/working path for docker commands
+            $allDockerArgs += $proj.Folder
+        }
+
+        if (-not $targetVm) {
+            Write-Host "Usage: ./vm-compose.ps1 <vm> docker <docker args...>" -ForegroundColor Yellow
+        } elseif (-not $allDockerArgs) {
+            Write-Host "Usage: ./vm-compose.ps1 <vm> docker <docker args...>" -ForegroundColor Yellow
+        } else {
+            Invoke-DockerInVM $targetVm $allDockerArgs
         }
     }
 
     "docker-test" {
         Assert-Admin
         if (-not $VmName) {
-            Write-Host "Usage: ./vm-compose.ps1 docker-test <vmName>" -ForegroundColor Yellow
+            Write-Host "Usage: ./vm-compose.ps1 <vm> docker-test" -ForegroundColor Yellow
         } else {
             Invoke-DockerTest $VmName
         }
@@ -2765,19 +2864,29 @@ switch ($Command) {
 
     "docker-compose" {
         Assert-Admin
-        if (-not $VmName) {
-            Write-Host "Usage: ./vm-compose.ps1 docker-compose <vmName> <compose args...>" -ForegroundColor Yellow
+        $targetVm = $VmName
+        $allDockerArgs = @()
+        if ($ExecCommand) { $allDockerArgs += $ExecCommand }
+        if ($StorageName) { $allDockerArgs += $StorageName }
+        if ($ExtraArg)    { $allDockerArgs += $ExtraArg }
+        if ($DockerArgs)  { $allDockerArgs += $DockerArgs }
+
+        if ($Project) {
+            $proj = Resolve-Project -projectName $Project -stack $stack -explicitVm $targetVm
+            if (-not $proj) { break }
+            $targetVm = $proj.VmName
+            # Prepend --project-directory and -f flags before any user-supplied args
+            $projArgs = @('--project-directory', $proj.Folder, '-f', "$($proj.Folder)\docker-compose.yml")
+            $allDockerArgs = $projArgs + $allDockerArgs
+        }
+
+        if (-not $targetVm) {
+            Write-Host "Usage: ./vm-compose.ps1 <vm> docker-compose <compose args...>" -ForegroundColor Yellow
+            Write-Host "       ./vm-compose.ps1 docker-compose -Project <name> <compose args...>" -ForegroundColor Yellow
+        } elseif (-not $allDockerArgs) {
+            Write-Host "Usage: ./vm-compose.ps1 <vm> docker-compose <compose args...>" -ForegroundColor Yellow
         } else {
-            $allDockerArgs = @()
-            if ($ExecCommand) { $allDockerArgs += $ExecCommand }
-            if ($StorageName) { $allDockerArgs += $StorageName }
-            if ($ExtraArg)    { $allDockerArgs += $ExtraArg }
-            if ($DockerArgs)  { $allDockerArgs += $DockerArgs }
-            if (-not $allDockerArgs) {
-                Write-Host "Usage: ./vm-compose.ps1 docker-compose <vmName> <compose args...>" -ForegroundColor Yellow
-            } else {
-                Invoke-DockerComposeInVM $VmName $allDockerArgs
-            }
+            Invoke-DockerComposeInVM $targetVm $allDockerArgs
         }
     }
 
@@ -2884,15 +2993,24 @@ switch ($Command) {
 
     "note" {
         Assert-Admin
-        $subCmd = $VmName      # show | add | edit
-        $noteVm = $ExecCommand # vm name
+        # Support both orderings:
+        #   New (noun-verb): ./vm-compose.ps1 solr note show   → $VmName=solr $ExecCommand=show
+        #   Old (verb-noun): ./vm-compose.ps1 note show solr   → $VmName=show $ExecCommand=solr
+        $noteActions = @("show","add","edit")
+        if ($VmName -in $noteActions) {
+            # Old form: note <action> <vm>
+            $subCmd = $VmName; $noteVm = $ExecCommand
+        } else {
+            # New form: <vm> note <action>
+            $noteVm = $VmName; $subCmd = $ExecCommand
+        }
 
-        if (-not $subCmd -or $subCmd -notin @("show","add","edit") -or -not $noteVm) {
-            Write-Host "Usage: ./vm-compose.ps1 note <show|add|edit> <vmName>" -ForegroundColor Yellow
+        if (-not $subCmd -or $subCmd -notin $noteActions -or -not $noteVm) {
+            Write-Host "Usage: ./vm-compose.ps1 <vm> note <show|add|edit>" -ForegroundColor Yellow
             Write-Host ""
-            Write-Host "  note show <vm>   Print the VM's Notes field"
-            Write-Host "  note add  <vm>   Append text to the Notes field (prompted)"
-            Write-Host "  note edit <vm>   Open Notes in Notepad for full editing"
+            Write-Host "  solr note show   Print the VM's Notes field"
+            Write-Host "  solr note add    Append text to the Notes field (prompted)"
+            Write-Host "  solr note edit   Open Notes in Notepad for full editing"
             break
         }
 

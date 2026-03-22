@@ -3,6 +3,9 @@
 Commonly used `vm-compose.ps1` commands with real-world examples.
 
 > Most commands require running as **Administrator**.
+> 
+> Commands follow **noun-verb** ordering: `./vm-compose.ps1 <vm> <command>`.  
+> Both orderings are supported: `./vm-compose.ps1 solr restart` and `./vm-compose.ps1 restart solr` are equivalent.
 
 ---
 
@@ -22,13 +25,13 @@ Commonly used `vm-compose.ps1` commands with real-world examples.
 ./vm-compose.ps1 down
 
 # Restart a single VM
-./vm-compose.ps1 restart solr
+./vm-compose.ps1 solr restart
 
 # Destroy all VM definitions (VHDXes are preserved)
 ./vm-compose.ps1 destroy
 
 # Destroy a single VM
-./vm-compose.ps1 destroy solr
+./vm-compose.ps1 solr destroy
 ```
 
 ---
@@ -40,13 +43,13 @@ Commonly used `vm-compose.ps1` commands with real-world examples.
 ./vm-compose.ps1 status
 
 # Show detailed info for a single VM (aliases: describe, show)
-./vm-compose.ps1 inspect solr
+./vm-compose.ps1 solr inspect
 
 # Print just the IP address
-./vm-compose.ps1 ip solr
+./vm-compose.ps1 solr ip
 
 # Live CPU / memory loop (Ctrl+C to exit)
-./vm-compose.ps1 top solr
+./vm-compose.ps1 solr top
 ```
 
 ---
@@ -58,7 +61,7 @@ Commonly used `vm-compose.ps1` commands with real-world examples.
 ./vm-compose.ps1 health
 
 # Health check a single VM
-./vm-compose.ps1 health solr
+./vm-compose.ps1 solr health
 ```
 
 Output includes: VM state, IP, Containers feature, Docker Engine version, persistent volume status, shared volume mounts, and bootstrap completion timestamp.
@@ -69,16 +72,16 @@ Output includes: VM state, IP, Containers feature, Docker Engine version, persis
 
 ```powershell
 # Run a command inside a VM
-./vm-compose.ps1 exec solr "ipconfig"
+./vm-compose.ps1 solr exec "ipconfig"
 
 # Run a multi-part command (quote the whole thing)
-./vm-compose.ps1 exec solr "Get-Service docker | Select Name, Status"
+./vm-compose.ps1 solr exec "Get-Service docker | Select Name, Status"
 
 # Open an interactive PowerShell shell inside a VM
-./vm-compose.ps1 ssh solr
+./vm-compose.ps1 solr ssh
 
 # List top processes by CPU
-./vm-compose.ps1 ps solr
+./vm-compose.ps1 solr ps
 ```
 
 ---
@@ -87,25 +90,55 @@ Output includes: VM state, IP, Containers feature, Docker Engine version, persis
 
 ```powershell
 # List running containers
-./vm-compose.ps1 docker solr ps
+./vm-compose.ps1 solr docker ps
 
 # List all containers (including stopped)
-./vm-compose.ps1 docker solr ps -a
+./vm-compose.ps1 solr docker ps -a
 
 # List images
-./vm-compose.ps1 docker solr images
+./vm-compose.ps1 solr docker images
 
 # Pull an image
-./vm-compose.ps1 docker solr pull mcr.microsoft.com/windows/nanoserver:ltsc2022
+./vm-compose.ps1 solr docker pull mcr.microsoft.com/windows/nanoserver:ltsc2022
 
 # Run a one-off container
-./vm-compose.ps1 docker solr run --rm mcr.microsoft.com/windows/nanoserver:ltsc2022 cmd /c echo hello
+./vm-compose.ps1 solr docker run --rm mcr.microsoft.com/windows/nanoserver:ltsc2022 cmd /c echo hello
 
 # Run a nanoserver hello-world smoke test (auto-detects OS build)
-./vm-compose.ps1 docker-test solr
+./vm-compose.ps1 solr docker-test
 
 # Check disk usage
-./vm-compose.ps1 docker solr system df
+./vm-compose.ps1 solr docker system df
+```
+
+---
+
+## Docker Compose Inside a VM
+
+```powershell
+# Using raw flags (always works)
+./vm-compose.ps1 solr docker-compose --project-directory P:\enshrouded-docker -f P:\enshrouded-docker\docker-compose.yml build
+
+# Using a project shortcut defined in vmstack.yaml projects: section
+./vm-compose.ps1 solr docker-compose -Project enshrouded build
+
+# VM is inferred from the project definition (project_vm) — no need to specify
+./vm-compose.ps1 docker-compose -Project enshrouded up -d
+
+# Show running compose services
+./vm-compose.ps1 solr docker-compose -Project enshrouded ps
+
+# View compose logs
+./vm-compose.ps1 solr docker-compose -Project enshrouded logs --tail 50
+```
+
+Define projects in `vmstack.yaml`:
+```yaml
+projects:
+  enshrouded:
+    project_vm: solr
+    project_folder: P:\enshrouded-docker
+    project_type: docker-compose
 ```
 
 ---
@@ -114,16 +147,16 @@ Output includes: VM state, IP, Containers feature, Docker Engine version, persis
 
 ```powershell
 # Show recent Application event log from a VM
-./vm-compose.ps1 logs solr
+./vm-compose.ps1 solr logs
 
 # List available logs inside a VM
-./vm-compose.ps1 getlog solr
+./vm-compose.ps1 solr getlog
 
 # Fetch the bootstrap log
-./vm-compose.ps1 getlog bootstrap solr
+./vm-compose.ps1 solr getlog bootstrap
 
-# Fetch the Docker install log
-./vm-compose.ps1 getlog docker solr
+# Fetch the Docker event log
+./vm-compose.ps1 solr getlog docker
 ```
 
 ---
@@ -150,13 +183,13 @@ Output includes: VM state, IP, Containers feature, Docker Engine version, persis
 
 ```powershell
 # Show the notes for a VM
-./vm-compose.ps1 note show solr
+./vm-compose.ps1 solr note show
 
 # Append a note
-./vm-compose.ps1 note add solr
+./vm-compose.ps1 solr note add
 
 # Open notes in Notepad for full editing
-./vm-compose.ps1 note edit solr
+./vm-compose.ps1 solr note edit
 ```
 
 ---
@@ -211,10 +244,10 @@ Then use the same `storage shared` commands (they appear with type `named-pv` in
 ./vm-compose.ps1 storage shared localunmount shareddata
 
 # Hot-add a shared disk to a running VM
-./vm-compose.ps1 mount solr shareddata
+./vm-compose.ps1 solr mount shareddata
 
 # Remove a shared disk from a VM
-./vm-compose.ps1 unmount solr shareddata
+./vm-compose.ps1 solr unmount shareddata
 
 # Health check all shared volumes
 ./vm-compose.ps1 storage shared health
