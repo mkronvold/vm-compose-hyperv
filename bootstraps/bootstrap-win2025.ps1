@@ -85,6 +85,10 @@ $null = Invoke-BootstrapStep -Step 'Set network profile private' -WarnOnError -A
     Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction Stop
 }
 
+$null = Invoke-BootstrapStep -Step 'Set timezone' -WarnOnError -Action {
+    Set-TimeZone -Id '__HOST_TIMEZONE__' -ErrorAction Stop
+}
+
 $null = Invoke-BootstrapStep -Step 'Apply desktop UX defaults' -WarnOnError -Action {
     reg.exe add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v "HideFileExt" /t REG_DWORD /d 0 /f | Out-Null
     reg.exe add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Search" /v "SearchboxTaskbarMode" /t REG_DWORD /d 0 /f | Out-Null

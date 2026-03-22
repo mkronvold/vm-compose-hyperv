@@ -770,6 +770,7 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
     $bootstrap = Get-Content $bootstrapTemplatePath -Raw
     $bootstrap = $bootstrap.Replace('__PREFERRED_DOCKER_VOLUME_LABEL__', $preferredDockerVolumeLabel)
     $bootstrap = $bootstrap.Replace('__DISM_CONVERSION_BLOCK__', $dismConversionBlock)
+    $bootstrap = $bootstrap.Replace('__HOST_TIMEZONE__', (Get-TimeZone).Id)
 
     Invoke-IfLive "Write bootstrap.ps1 to $SetupDir" {
         $bootstrap | Out-File "$SetupDir\bootstrap.ps1" -Encoding utf8 -Force
