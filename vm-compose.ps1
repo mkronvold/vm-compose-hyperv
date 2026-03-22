@@ -57,7 +57,26 @@ param(
 
 $Version = "1.1.0"
 
-# All recognized command keywords. Used to distinguish a VM name at position 0
+# -------------------------
+# Debug logging
+# Set VMCOMPOSE_DEBUG=true or VMCOMPOSE_DEBUG=1 to enable.
+# Logs to vm-compose-debug.log in the script directory.
+# -------------------------
+$DebugEnabled = ($env:VMCOMPOSE_DEBUG -in @('true','1','yes'))
+$DebugLogFile = Join-Path $PSScriptRoot 'vm-compose-debug.log'
+
+function Write-DebugLog {
+    param(
+        [string]$Message,
+        [ValidateSet('INFO','STEP','WARN','ERROR','BUILD')][string]$Level = 'INFO'
+    )
+    if (-not $DebugEnabled) { return }
+    $ts   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+    $line = "[$ts] [$Level] $Message"
+    try { Add-Content -Path $DebugLogFile -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
+}
+
+# All recognized command keywords.Used to distinguish a VM name at position 0
 # from a command keyword (enables noun-verb ordering: "./vm-compose.ps1 solr restart").
 $KnownCommands = @(
     'up','start','build','down','stop','restart','reboot','destroy','list','status',
@@ -235,14 +254,29 @@ if (-not (Test-Path $ConfigFile)) {
     exit 1
 }
 
+# Log the invocation now that we know the command is valid
+$_debugArgs = ($PSBoundParameters.GetEnumerator() | ForEach-Object { "-$($_.Key) $($_.Value)" }) -join ' '
+Write-DebugLog "Invoked: Command=$Command VmName=$VmName ExecCommand=$ExecCommand Project=$Project DryRun=$DryRun Force=$Force args=[$_debugArgs]" INFO
+
 # Dry-run helper: runs the scriptblock only when not in dry-run mode.
-# Always prints what would happen.
+# Times execution and logs pass/fail when debug is enabled.
 function Invoke-IfLive {
     param([string]$Description, [scriptblock]$Action)
     if ($DryRun) {
         Write-Host "[DRY RUN] Would: $Description" -ForegroundColor Cyan
+        Write-DebugLog "DRYRUN: $Description" STEP
     } else {
-        & $Action
+        Write-DebugLog "BEGIN:  $Description" STEP
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            & $Action
+            $sw.Stop()
+            Write-DebugLog "OK:     $Description ($($sw.ElapsedMilliseconds)ms)" STEP
+        } catch {
+            $sw.Stop()
+            Write-DebugLog "FAIL:   $Description ($($sw.ElapsedMilliseconds)ms) — $_" ERROR
+            throw
+        }
     }
 }
 
@@ -469,20 +503,30 @@ function Build-VM {
     Write-Host ""
     Write-Host "=== Building VM: $vmName ==="
 
+    # Log the full config being used for this build
+    Write-DebugLog "BUILD START: vmName=$vmName AutoStart=$AutoStart Rebuild=$Rebuild" BUILD
+    Write-DebugLog "  memory_gb=$($cfg.memory_gb)  cpus=$($cfg.cpus)  os_disk_gb=$($cfg.os_disk_gb)  persistent_disk_gb=$($cfg.persistent_disk_gb)" BUILD
+    Write-DebugLog "  iso=$($cfg.iso)  network=$($cfg.network)  bootstrap_template=$($cfg.bootstrap_template)" BUILD
+    Write-DebugLog "  mount=[$($cfg.mount -join ', ')]  mac_address=$($cfg.mac_address)" BUILD
+
     $storageConflicts = Get-VMStorageHostConflicts $cfg
     if ($storageConflicts.Count -gt 0) {
         Write-StorageHostConflict -VmName $vmName -Conflicts $storageConflicts
+        Write-DebugLog "BUILD ABORT: $vmName — storage host conflicts: $($storageConflicts -join '; ')" ERROR
         return
     }
 
     # If the VM already exists, handle rebuild or start logic
     $existingVm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
     if ($existingVm) {
+        Write-DebugLog "  Existing VM found: state=$($existingVm.State)  MemGB=$([math]::Round($existingVm.MemoryAssigned/1GB,2))  CPUs=$($existingVm.ProcessorCount)" BUILD
         if ($AutoStart -and -not $Rebuild) {
             if ($existingVm.State -eq 'Running') {
                 Write-Host "VM '$vmName' is already running." -ForegroundColor Green
+                Write-DebugLog "BUILD SKIP: $vmName already running — no changes made" BUILD
             } else {
                 Write-Host "VM '$vmName' already exists (state: $($existingVm.State)). Starting..." -ForegroundColor Yellow
+                Write-DebugLog "BUILD START-ONLY: $vmName exists, starting (not rebuilding)" BUILD
                 Invoke-IfLive "Start-VM $vmName" { Start-VM -Name $vmName }
                 Send-DVDBootKeypress -VMName $vmName
             }
@@ -494,12 +538,14 @@ function Build-VM {
             $answer = Read-Host "  Rebuild? This will DESTROY the VM and recreate it. [y/N]"
             if ($answer -notmatch '^[Yy]') {
                 Write-Host "Skipping '$vmName'." -ForegroundColor Gray
+                Write-DebugLog "BUILD SKIP: $vmName — user declined rebuild" BUILD
                 return
             }
         }
 
         # Destroy VM before rebuilding
         Write-Host "Destroying '$vmName' for rebuild..." -ForegroundColor Yellow
+        Write-DebugLog "  Destroying existing VM $vmName for rebuild" BUILD
         Invoke-IfLive "Stop-VM $vmName (force)" {
             if ($existingVm.State -ne 'Off') { Stop-VM -Name $vmName -Force -TurnOff -ErrorAction SilentlyContinue }
         }
@@ -574,6 +620,7 @@ function Build-VM {
     if ($persistentDiskRaw) {
         if (-not [double]::TryParse($persistentDiskRaw, [ref]$persistentDiskGB)) {
             Write-Host "ERROR: VM '$vmName' has invalid persistent_disk_gb value '$persistentDiskRaw' (must be numeric)." -ForegroundColor Red
+            Write-DebugLog "BUILD ABORT: $vmName — invalid persistent_disk_gb '$persistentDiskRaw'" ERROR
             return
         }
         if ($persistentDiskGB -gt 0) {
@@ -587,6 +634,11 @@ function Build-VM {
     if (-not $hasPersistentDisk -and $cfg.mount -and @($cfg.mount) -contains $namedPvForVm -and $stack.storage -and $stack.storage[$namedPvForVm]) {
         $preferredDockerVolumeLabel = $namedPvForVm
     }
+
+    # Log resolved paths and disk plan
+    Write-DebugLog "  Paths: VmPath=$VmPath  VhdPath=$VhdPath  AnswerIso=$AnswerIsoPath" BUILD
+    Write-DebugLog "  Disks: osDisk=$($cfg.os_disk_gb)GB  persistentDisk=$(if ($hasPersistentDisk) { "${persistentDiskGB}GB at $PersistentVhdPath" } else { 'none' })" BUILD
+    Write-DebugLog "  DockerVolumeLabel=$preferredDockerVolumeLabel" BUILD
 
     Invoke-IfLive "New-Item Directory $VmPath + $SetupDir" {
         New-Item -ItemType Directory -Path $VmPath -Force | Out-Null
@@ -938,8 +990,10 @@ if (`$LASTEXITCODE -eq 0 -or `$LASTEXITCODE -eq 3010) {
         Invoke-IfLive "Start-VM $vmName" { Start-VM $vmName }
         Send-DVDBootKeypress -VMName $vmName
         Write-Host "VM '$vmName' started and installing automatically."
+        Write-DebugLog "BUILD COMPLETE: $vmName — created and started  memory=$($cfg.memory_gb)GB cpus=$($cfg.cpus) osDisk=$($cfg.os_disk_gb)GB" BUILD
     } else {
         Write-Host "VM '$vmName' built. Run 'up' to start it." -ForegroundColor Cyan
+        Write-DebugLog "BUILD COMPLETE: $vmName — created (not started)  memory=$($cfg.memory_gb)GB cpus=$($cfg.cpus) osDisk=$($cfg.os_disk_gb)GB" BUILD
     }
 }
 
@@ -2632,6 +2686,9 @@ if ($VmName -eq "help" -or $ExecCommand -eq "help" -or $StorageName -eq "help") 
     exit 0
 }
 
+$_cmdStartTime = Get-Date
+try {
+
 switch ($Command) {
     { $_ -in "up","start" } {
         Assert-Admin
@@ -3074,3 +3131,11 @@ switch ($Command) {
         }
     }
 }
+
+} catch {
+    $elapsed = [math]::Round(((Get-Date) - $_cmdStartTime).TotalSeconds, 2)
+    Write-DebugLog "COMMAND FAILED: $Command (${elapsed}s) — $_" ERROR
+    throw
+}
+$elapsed = [math]::Round(((Get-Date) - $_cmdStartTime).TotalSeconds, 2)
+Write-DebugLog "COMMAND OK: $Command (${elapsed}s)" INFO
