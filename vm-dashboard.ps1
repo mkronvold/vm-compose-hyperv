@@ -119,12 +119,22 @@ Start-PodeServer -Threads 2 {
                     }
                 }
                 if ($cred) { $icArgs.Credential = $cred }
+
+                # Concurrency guard: skip this VM if a previous poll is still running.
+                if (Get-PodeState -Name "Polling_$vmName") { continue }
+
+                # Circuit breaker: skip this VM if it has failed 3+ times recently.
+                $backoffUntil = Get-PodeState -Name "PollBackoff_$vmName"
+                if ($backoffUntil -and (Get-Date) -lt $backoffUntil) { continue }
+
+                Set-PodeState -Name "Polling_$vmName" -Value $true
+
                 # Wrap in Start-Job so a hung PS Direct connection can be killed with a timeout.
                 # Invoke-Command -VMName has no -Timeout parameter; without this wrapper, a slow/
                 # unresponsive VM accumulates ~1 session per timer tick and exhausts vmicvmsession (~5 max).
-                $sbStr      = $icArgs.ScriptBlock.ToString()
-                $vmNameArg  = $vmName
-                $credArg    = if ($icArgs.ContainsKey('Credential')) { $icArgs.Credential } else { $null }
+                $sbStr     = $icArgs.ScriptBlock.ToString()
+                $vmNameArg = $vmName
+                $credArg   = if ($icArgs.ContainsKey('Credential')) { $icArgs.Credential } else { $null }
                 try {
                     $j = Start-Job -ScriptBlock {
                         param([string]$vn, $cr, [string]$sb)
@@ -132,13 +142,30 @@ Start-PodeServer -Threads 2 {
                         if ($cr) { $a.Credential = $cr }
                         Invoke-Command @a
                     } -ArgumentList $vmNameArg, $credArg, $sbStr
-                    if (-not (Wait-Job $j -Timeout 15)) { Stop-Job $j }
+                    $completed = Wait-Job $j -Timeout 15
+                    if (-not $completed) { Stop-Job $j }
                     $raw  = Receive-Job $j -ErrorAction SilentlyContinue
                     Remove-Job $j -Force -ErrorAction SilentlyContinue
-                    $json = if ($raw -is [array]) { $raw | Where-Object { $_ -is [string] } | Select-Object -Last 1 } else { [string]$raw }
-                    if ($json) { Set-PodeState -Name "DockerCache_$vmName" -Value $json }
+
+                    if ($completed) {
+                        $json = if ($raw -is [array]) { $raw | Where-Object { $_ -is [string] } | Select-Object -Last 1 } else { [string]$raw }
+                        if ($json) { Set-PodeState -Name "DockerCache_$vmName" -Value $json }
+                        # Success — clear failure count and backoff
+                        Set-PodeState -Name "PollFailures_$vmName" -Value 0
+                        Set-PodeState -Name "PollBackoff_$vmName"  -Value $null
+                    } else {
+                        throw "Poll timed out after 15s"
+                    }
                 } catch {
-                    # Keep stale cache on error; don't overwrite good data with an error
+                    # Increment failure count; back off after 3 consecutive failures
+                    $failures = [int](Get-PodeState -Name "PollFailures_$vmName")
+                    $failures++
+                    Set-PodeState -Name "PollFailures_$vmName" -Value $failures
+                    if ($failures -ge 3) {
+                        Set-PodeState -Name "PollBackoff_$vmName" -Value (Get-Date).AddMinutes(5)
+                    }
+                } finally {
+                    Set-PodeState -Name "Polling_$vmName" -Value $false
                 }
             }
         } catch {}
