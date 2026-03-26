@@ -119,8 +119,22 @@ Start-PodeServer -Threads 2 {
                     }
                 }
                 if ($cred) { $icArgs.Credential = $cred }
+                # Wrap in Start-Job so a hung PS Direct connection can be killed with a timeout.
+                # Invoke-Command -VMName has no -Timeout parameter; without this wrapper, a slow/
+                # unresponsive VM accumulates ~1 session per timer tick and exhausts vmicvmsession (~5 max).
+                $sbStr      = $icArgs.ScriptBlock.ToString()
+                $vmNameArg  = $vmName
+                $credArg    = if ($icArgs.ContainsKey('Credential')) { $icArgs.Credential } else { $null }
                 try {
-                    $raw = Invoke-Command @icArgs
+                    $j = Start-Job -ScriptBlock {
+                        param([string]$vn, $cr, [string]$sb)
+                        $a = @{ VMName=$vn; ErrorAction='Stop'; ScriptBlock=[ScriptBlock]::Create($sb) }
+                        if ($cr) { $a.Credential = $cr }
+                        Invoke-Command @a
+                    } -ArgumentList $vmNameArg, $credArg, $sbStr
+                    if (-not (Wait-Job $j -Timeout 15)) { Stop-Job $j }
+                    $raw  = Receive-Job $j -ErrorAction SilentlyContinue
+                    Remove-Job $j -Force -ErrorAction SilentlyContinue
                     $json = if ($raw -is [array]) { $raw | Where-Object { $_ -is [string] } | Select-Object -Last 1 } else { [string]$raw }
                     if ($json) { Set-PodeState -Name "DockerCache_$vmName" -Value $json }
                 } catch {

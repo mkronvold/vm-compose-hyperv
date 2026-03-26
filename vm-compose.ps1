@@ -3080,14 +3080,19 @@ switch ($Command) {
             Write-Host "  Example: ./vm-compose.ps1 ls nnta:P:\caddy-docs" -ForegroundColor Gray
         } else {
             Write-Host "=== $lsVm`:$lsPath ===" -ForegroundColor Cyan
-            Invoke-Command -VMName $lsVm -Credential (Get-VMCredential $lsVm) -ScriptBlock {
-                param($p)
-                Get-ChildItem -LiteralPath $p -ErrorAction Stop |
-                    Select-Object Mode, LastWriteTime,
-                        @{N='Size';E={ if ($_.PSIsContainer) { '<DIR>' } else { '{0,10:N0}' -f $_.Length } }},
-                        Name |
-                    Format-Table -AutoSize
-            } -ArgumentList $lsPath -ErrorAction SilentlyContinue
+            try {
+                Invoke-Command -VMName $lsVm -Credential (Get-VMCredential $lsVm) -ErrorAction Stop -ScriptBlock {
+                    param($p)
+                    Get-ChildItem -LiteralPath $p -ErrorAction Stop |
+                        Select-Object Mode, LastWriteTime,
+                            @{N='Size';E={ if ($_.PSIsContainer) { '<DIR>' } else { '{0,10:N0}' -f $_.Length } }},
+                            Name |
+                        Format-Table -AutoSize
+                } -ArgumentList $lsPath
+            } catch {
+                Write-Host "Could not connect to '$lsVm' via PowerShell Direct: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "If vmicvmsession is exhausted, open Hyper-V console and run: Restart-Service vmicvmsession" -ForegroundColor Yellow
+            }
         }
     }
 
