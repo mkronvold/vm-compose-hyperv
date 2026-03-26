@@ -110,7 +110,14 @@ Start-PodeServer -Threads 2 {
                                     $cpu = $sm[$c.Names].CPUPerc; $mem = $sm[$c.Names].MemUsage
                                     $netIO = $sm[$c.Names].NetIO; $blockIO = $sm[$c.Names].BlockIO; $pids = $sm[$c.Names].PIDs
                                 }
-                                if ($c) { $out.Add([PSCustomObject]@{ name=$c.Names; image=$c.Image; status=$c.Status; state=$c.State; cpu=$cpu; mem=$mem; netIO=$netIO; blockIO=$blockIO; pids=$pids; ports=$c.Ports; id=$c.ID }) }
+                                $commitMB = $null
+                        if ($c -and $c.State -eq 'running' -and $c.Names) {
+                            try {
+                                $cr = & docker exec $c.Names powershell -NoLogo -NonInteractive -Command '(Get-Process|Measure-Object PrivateMemorySize64 -Sum).Sum/1MB' 2>$null
+                                if ($cr) { $num = [string]$cr -replace '[^\d.]',''; if ($num) { $commitMB = [int][math]::Round([double]$num) } }
+                            } catch {}
+                        }
+                        if ($c) { $out.Add([PSCustomObject]@{ name=$c.Names; image=$c.Image; status=$c.Status; state=$c.State; cpu=$cpu; mem=$mem; netIO=$netIO; blockIO=$blockIO; pids=$pids; ports=$c.Ports; id=$c.ID; commitMB=$commitMB }) }
                             } catch {}
                         }
                         $pvTotal = if ($pvDisk) { [math]::Round($pvDisk.Size / 1GB, 1) } else { $null }
@@ -1109,11 +1116,12 @@ $pvUnmountModal
                 $ctr = @($cache.containers) | Where-Object { $_.name -eq $ctrName } | Select-Object -First 1
                 if ($ctr) {
                     $result = [PSCustomObject]@{
-                        cpu     = if ($ctr.cpu)     { $ctr.cpu }     else { '0%' }
-                        mem     = if ($ctr.mem)     { $ctr.mem }     else { '0B / 0B' }
-                        netIO   = if ($ctr.netIO)   { $ctr.netIO }   else { '-' }
-                        blockIO = if ($ctr.blockIO) { $ctr.blockIO } else { '-' }
-                        pids    = if ($ctr.pids)    { $ctr.pids }    else { '0' }
+                        cpu      = if ($ctr.cpu)      { $ctr.cpu }      else { '0%' }
+                        mem      = if ($ctr.mem)      { $ctr.mem }      else { '0B / 0B' }
+                        netIO    = if ($ctr.netIO)    { $ctr.netIO }    else { '-' }
+                        blockIO  = if ($ctr.blockIO)  { $ctr.blockIO }  else { '-' }
+                        pids     = if ($ctr.pids)     { $ctr.pids }     else { '0' }
+                        commitMB = if ($null -ne $ctr.commitMB) { $ctr.commitMB } else { $null }
                     }
                     Write-PodeTextResponse -ContentType 'application/json' -Value ($result | ConvertTo-Json -Compress)
                     return
@@ -1414,7 +1422,8 @@ setInterval(pollContainers, 5000);
         <div class="card-header fw-bold">Live Stats</div>
         <ul class="list-group list-group-flush">
           <li class="list-group-item"><strong>CPU:</strong> <span id="sCpu">-</span></li>
-          <li class="list-group-item"><strong>Memory:</strong> <span id="sMem">-</span></li>
+          <li class="list-group-item"><strong>Memory (WS):</strong> <span id="sMem">-</span></li>
+          <li class="list-group-item"><strong>Committed:</strong> <span id="sCommit">-</span></li>
           <li class="list-group-item"><strong>Net I/O:</strong> <span id="sNet">-</span></li>
           <li class="list-group-item"><strong>Block I/O:</strong> <span id="sBlock">-</span></li>
           <li class="list-group-item"><strong>PIDs:</strong> <span id="sPids">-</span></li>
@@ -1467,11 +1476,12 @@ function pollStats() {
   fetch('/api/vm/' + vmName + '/docker/' + ctrName + '/stats')
     .then(r => r.json()).then(d => {
       if (d.error) return;
-      document.getElementById('sCpu').textContent   = d.cpu;
-      document.getElementById('sMem').textContent   = d.mem;
-      document.getElementById('sNet').textContent   = d.netIO;
-      document.getElementById('sBlock').textContent = d.blockIO;
-      document.getElementById('sPids').textContent  = d.pids;
+      document.getElementById('sCpu').textContent    = d.cpu;
+      document.getElementById('sMem').textContent    = d.mem;
+      document.getElementById('sCommit').textContent = (d.commitMB != null) ? d.commitMB.toLocaleString() + ' MB' : '-';
+      document.getElementById('sNet').textContent    = d.netIO;
+      document.getElementById('sBlock').textContent  = d.blockIO;
+      document.getElementById('sPids').textContent   = d.pids;
     }).catch(() => {});
 }
 function pollLogs() {
