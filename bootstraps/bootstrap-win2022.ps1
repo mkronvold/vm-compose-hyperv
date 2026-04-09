@@ -275,9 +275,39 @@ $null = Invoke-BootstrapStep -Step 'Install gh copilot extension' -WarnOnError -
     if ($LASTEXITCODE -ne 0) { throw "gh extension install failed (exit $LASTEXITCODE)." }
 }
 
+$null = Invoke-BootstrapStep -Step 'Write PowerShell profile' -WarnOnError -Action {
+    $profileDir = Split-Path $PROFILE.AllUsersAllHosts -Parent
+    if (-not (Test-Path $profileDir)) { New-Item $profileDir -ItemType Directory -Force | Out-Null }
+    $profileContent = @'
+# docker wrapper — suppress compose/build progress noise written to stderr.
+# PowerShell treats all native stderr as NativeCommandError; docker CLI uses
+# stderr for progress lines (Creating, Starting, etc.) which are not errors.
+function docker {
+    $isCompose = $args -contains 'compose' -or $args -contains 'build' -or $args -contains 'pull' -or $args -contains 'push'
+    if ($isCompose) {
+        $stderr = [System.Collections.Generic.List[string]]::new()
+        & docker.exe @args 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                $msg = $_.Exception.Message
+                # Suppress known progress-only patterns; surface real errors
+                if ($msg -notmatch '^\s*(Container|Network|Volume|Image|Service)\s+\S.*\s+(Creating|Created|Starting|Started|Stopping|Stopped|Removing|Removed|Pulling|Pulled|Building|Built|Pushing|Pushed)\s*$') {
+                    $stderr.Add($msg)
+                }
+            } else {
+                $_
+            }
+        }
+        if ($stderr.Count -gt 0) { $stderr | ForEach-Object { Write-Error $_ } }
+    } else {
+        & docker.exe @args
+    }
+}
+'@
+    Set-Content -Path $PROFILE.AllUsersAllHosts -Value $profileContent -Encoding UTF8 -Force
+}
+
 __DISM_CONVERSION_BLOCK__
 Write-BootstrapStatus -Step 'finalize' -State 'complete'
 Write-Host "Bootstrap complete: $($script:bootstrapWarnings) warnings, $($script:bootstrapFailures) failures."
 Write-Host "Bootstrap finished: $(Get-Date)"
 Stop-Transcript | Out-Null
-
